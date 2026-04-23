@@ -1,3 +1,26 @@
-.venv
-fracfocus_data
-.idea
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Downloaded & extracted data (büyük dosyalar, git'e yüklenmiyor)
+fracfocus_data/
+
+# IDE
+.idea/
+.vscode/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Environment variables (şifre/secret içerebilir)
+.env
+
+# uv lock (opsiyonel — takım çalışmasında commit'lemek daha iyi)
+# uv.lock
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,52 @@
+from typing import Generator
+from fastapi import Depends
+from sqlalchemy.orm import Session
+from app.core.config import Settings
+from app.core.config import get_settings as _get_settings
+from app.core.database import get_db as _get_db, engine
+from app.repositories.fracfocus_repository import FracFocusRepository
+from app.repositories.sync_state_repository import SyncStateRepository, CsvFileStateRepository
+from app.services.download_service import DownloadService
+from app.services.csv_ingestion_service import CsvIngestionService
+from app.services.sync_service import SyncService
+
+
+def get_db() -> Generator[Session, None, None]:
+    yield from _get_db()
+
+
+def get_settings() -> Settings:
+    return _get_settings()
+
+
+def get_download_service(
+    settings: Settings = Depends(get_settings),
+) -> DownloadService:
+    return DownloadService(settings)
+
+
+def get_fracfocus_repo() -> FracFocusRepository:
+    return FracFocusRepository(engine)
+
+
+def get_csv_file_state_repo(db: Session = Depends(get_db)) -> CsvFileStateRepository:
+    return CsvFileStateRepository(db)
+
+
+def get_sync_service(
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+    download_svc: DownloadService = Depends(get_download_service),
+    fracfocus_repo: FracFocusRepository = Depends(get_fracfocus_repo),
+    csv_file_state_repo: CsvFileStateRepository = Depends(get_csv_file_state_repo),
+) -> SyncService:
+    ingestion_svc = CsvIngestionService(fracfocus_repo, csv_file_state_repo)
+    sync_state_repo = SyncStateRepository(db)
+    return SyncService(
+        db=db,
+        download_svc=download_svc,
+        ingestion_svc=ingestion_svc,
+        sync_state_repo=sync_state_repo,
+        csv_file_state_repo=csv_file_state_repo,
+        settings=settings,
+    )
