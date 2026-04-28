@@ -30,6 +30,9 @@ curl -X POST "http://localhost:8000/api/v1/seismic/texnet/fetch?min_magnitude=2.
 
 # USGS FDSN seismic catalog (historical coverage from USGS_START_TIME)
 curl -X POST "http://localhost:8000/api/v1/seismic/usgs/fetch?min_magnitude=1.5"
+
+# EarthScope (IRIS) seismic station metadata (Delaware Basin bbox)
+curl -X POST http://localhost:8000/api/v1/seismic/iris/stations/fetch
 ```
 
 `pytest` and `httpx` are declared as dev deps but **no test suite exists yet** — there's nothing to run.
@@ -42,10 +45,11 @@ Delaware Basin PoC: correlate seismic events with nearby saltwater disposal (SWD
 - Frac: FracFocus bulk CSV download → `fracfocus` table
 - Seismic: TexNet ArcGIS REST → `seismic_events` table (tagged `source="texnet"`)
 - Seismic: USGS FDSN GeoJSON → `seismic_events` table (tagged `source="usgs"`)
+- Seismic: EarthScope (IRIS) FDSN Station metadata → `iris_stations` table
 
 ## Architecture
 
-### Three independent ingestion pipelines, one database
+### Four independent ingestion pipelines, one database
 
 **FracFocus pipeline** (Frac bucket):
 ```
@@ -65,7 +69,14 @@ POST /api/v1/seismic/usgs/fetch
   └── USGSService → SeismicEventRepository → seismic_events table  (source="usgs")
 ```
 
-All three share the same SQLite file, engine, and `SessionLocal`. The two seismic pipelines write to the same `seismic_events` table, distinguished by the `source` column. Only FracFocus has a cron; seismic fetches are always manual.
+**EarthScope (IRIS) pipeline** (Seismic / coverage bucket):
+```
+POST /api/v1/seismic/iris/stations/fetch
+  └── IRISService → IRISStationRepository → iris_stations table
+GET  /api/v1/seismic/iris/stations   (paginated, ?network=TX&active_only=true)
+```
+
+All pipelines share the same SQLite file, engine, and `SessionLocal`. The two seismic event pipelines write to the same `seismic_events` table, distinguished by the `source` column. IRIS station metadata has its own dedicated `iris_stations` table. Only FracFocus has a cron; all seismic fetches are manual.
 
 ### Multi-catalog `seismic_events` table
 
@@ -88,13 +99,13 @@ The `fracfocus` table uses a different mechanism: `FracFocusRepository.ensure_co
 ### Two SQLAlchemy paradigms in the same app
 
 - **`fracfocus` table → SQLAlchemy Core** (`app/repositories/fracfocus_repository.py`). Schema inferred at runtime from the CSV header — no fixed ORM class possible. `create_table_if_not_exists` + `ensure_columns` manage the lifecycle.
-- **`sync_state`, `csv_file_state`, `seismic_events` → SQLAlchemy ORM** (`app/models/`). Fixed schemas. `Base.metadata.create_all` creates them; `_ensure_seismic_columns` patches the seismic table. **Both model modules must be imported before `create_all` is called** — `init_db()` does this with bare imports tagged `# noqa: F401`. Add any new ORM model there too.
+- **`sync_state`, `csv_file_state`, `seismic_events`, `iris_stations` → SQLAlchemy ORM** (`app/models/`). Fixed schemas. `Base.metadata.create_all` creates them; `_ensure_seismic_columns` / `_ensure_iris_station_columns` patch existing tables. **All model modules must be imported before `create_all` is called** — `init_db()` does this with bare imports tagged `# noqa: F401`. Add any new ORM model there too.
 
 ### Layered dependency injection
 
 All FastAPI wiring lives in `app/api/dependencies.py`. The FracFocus sync has a **second wiring point**: `app/tasks/fracfocus_scheduler.py::_run_scheduled_sync` manually reconstructs the same service graph because APScheduler runs in its own thread where FastAPI `Depends` is unavailable. **When adding a dependency to `SyncService`, update both files** or the cron will silently use stale wiring.
 
-The seismic pipelines (TexNet, USGS) have no scheduler equivalent — `app/api/dependencies.py` is the only place to update.
+The seismic pipelines (TexNet, USGS, IRIS) have no scheduler equivalent — `app/api/dependencies.py` is the only place to update.
 
 ### USGS `starttime` — critical default behaviour
 
@@ -130,7 +141,8 @@ Preserve the invariant: `sync_state.etag` is written **only after** all CSVs suc
 | `ZIP_URL` | FracFocus download URL | Source ZIP for FracFocus ingestion |
 | `SYNC_ENABLED` | `true` | Disables APScheduler cron when false |
 | `TEXNET_REST_URL` | `https://maps.texnet.beg.utexas.edu/…/MapServer/0` | ArcGIS layer base URL — `/query` appended internally |
-| `TEXNET_BBOX_MIN_LAT/MAX_LAT/MIN_LON/MAX_LON` | `28.5 / 32.5 / -105.5 / -102.5` | Delaware Basin bbox — shared by TexNet and USGS |
+| `TEXNET_BBOX_MIN_LAT/MAX_LAT/MIN_LON/MAX_LON` | `28.5 / 32.5 / -105.5 / -102.5` | Delaware Basin bbox — shared by TexNet, USGS, and IRIS |
 | `USGS_FDSN_URL` | `https://earthquake.usgs.gov/fdsnws/event/1/query` | FDSN Event API endpoint |
 | `USGS_MIN_MAGNITUDE` | `1.5` | Default floor when not passed as a query param |
 | `USGS_START_TIME` | `2000-01-01` | **Must be set** — without it USGS returns only the last 30 days |
+| `IRIS_STATION_URL` | `https://service.iris.edu/fdsnws/station/1/query` | EarthScope FDSN Station API endpoint |
