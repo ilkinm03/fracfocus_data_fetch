@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     # Default start date for historical coverage (pre-TexNet). ISO 8601 date string.
     USGS_START_TIME: str = "2000-01-01"
 
+    # EarthScope (IRIS) FDSN Station API — pipe-delimited text endpoint.
+    IRIS_STATION_URL: str = "https://service.iris.edu/fdsnws/station/1/query"
+
     API_HOST: str = "0.0.0.0"
     API_PORT: int = 8000
     LOG_LEVEL: str = "INFO"

@@ -32,8 +32,10 @@ def get_db() -> Generator[Session, None, None]:
 def init_db() -> None:
     from app.models import fracfocus_sync_state  # noqa: F401 — registers ORM models with Base
     from app.models import seismic_event  # noqa: F401
+    from app.models import iris_station  # noqa: F401
     Base.metadata.create_all(bind=engine)
     _ensure_seismic_columns()
+    _ensure_iris_station_columns()
 
 
 def _ensure_seismic_columns() -> None:
@@ -65,4 +67,36 @@ def _ensure_seismic_columns() -> None:
     import logging
     logging.getLogger(__name__).info(
         f"seismic_events: added {len(missing)} new column(s): {missing}"
+    )
+
+
+def _ensure_iris_station_columns() -> None:
+    """
+    Adds any columns present in the IRISStation model but absent from the
+    existing iris_stations table. Follows the same migration-free ALTER TABLE
+    pattern used for seismic_events.
+    """
+    from sqlalchemy import text, inspect as sa_inspect
+    if not sa_inspect(engine).has_table("iris_stations"):
+        return
+    with engine.connect() as conn:
+        existing = {
+            row[1]
+            for row in conn.execute(text('PRAGMA table_info("iris_stations")')).fetchall()
+        }
+    from app.models.iris_station import IRISStation
+    missing = [
+        col.key for col in IRISStation.__table__.columns
+        if col.key not in existing and col.key != "id"
+    ]
+    if not missing:
+        return
+    with engine.begin() as conn:
+        for col_key in missing:
+            col = IRISStation.__table__.columns[col_key]
+            col_type = col.type.compile(engine.dialect)
+            conn.execute(text(f'ALTER TABLE "iris_stations" ADD COLUMN "{col_key}" {col_type}'))
+    import logging
+    logging.getLogger(__name__).info(
+        f"iris_stations: added {len(missing)} new column(s): {missing}"
     )
