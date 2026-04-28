@@ -6,10 +6,10 @@ from app.core.config import get_settings as _get_settings
 from app.core.database import get_db as _get_db, engine
 from app.repositories.fracfocus_repository import FracFocusRepository
 from app.repositories.seismic_repository import SeismicEventRepository
-from app.repositories.sync_state_repository import SyncStateRepository, CsvFileStateRepository
-from app.services.download_service import DownloadService
-from app.services.csv_ingestion_service import CsvIngestionService
-from app.services.sync_service import SyncService
+from app.repositories.fracfocus_sync_state_repository import SyncStateRepository, CsvFileStateRepository
+from app.services.fracfocus_download_service import DownloadService
+from app.services.fracfocus_ingestion_service import CsvIngestionService
+from app.services.fracfocus_sync_service import SyncService
 from app.services.texnet_service import TexNetService
 
 

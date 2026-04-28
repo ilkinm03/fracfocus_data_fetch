@@ -30,6 +30,6 @@ def get_db() -> Generator[Session, None, None]:
 
 
 def init_db() -> None:
-    from app.models import sync_state  # noqa: F401 — registers ORM models with Base
+    from app.models import fracfocus_sync_state  # noqa: F401 — registers ORM models with Base
     from app.models import seismic_event  # noqa: F401
     Base.metadata.create_all(bind=engine)

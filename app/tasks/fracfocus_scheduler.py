@@ -17,10 +17,10 @@ def _run_scheduled_sync() -> None:
     because FastAPI's DI system is unavailable in this context.
     """
     from app.repositories.fracfocus_repository import FracFocusRepository
-    from app.repositories.sync_state_repository import SyncStateRepository, CsvFileStateRepository
-    from app.services.download_service import DownloadService
-    from app.services.csv_ingestion_service import CsvIngestionService
-    from app.services.sync_service import SyncService
+    from app.repositories.fracfocus_sync_state_repository import SyncStateRepository, CsvFileStateRepository
+    from app.services.fracfocus_download_service import DownloadService
+    from app.services.fracfocus_ingestion_service import CsvIngestionService
+    from app.services.fracfocus_sync_service import SyncService
 
     settings = get_settings()
     db = SessionLocal()

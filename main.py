@@ -2,7 +2,7 @@ import uvicorn
 from fastapi import FastAPI
 from app.core.config import get_settings
 from app.core.logging import setup_logging
-from app.tasks.scheduler import lifespan
+from app.tasks.fracfocus_scheduler import lifespan
 from app.api.v1.router import api_router
 
 settings = get_settings()

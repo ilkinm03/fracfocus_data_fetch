@@ -5,10 +5,10 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 from app.core.config import Settings
 from app.repositories.fracfocus_repository import FracFocusRepository
-from app.repositories.sync_state_repository import SyncStateRepository, CsvFileStateRepository
-from app.services.download_service import DownloadService
-from app.services.csv_ingestion_service import CsvIngestionService
-from app.schemas.sync import SyncResult, SyncStatusResponse, CsvFileStatus
+from app.repositories.fracfocus_sync_state_repository import SyncStateRepository, CsvFileStateRepository
+from app.services.fracfocus_download_service import DownloadService
+from app.services.fracfocus_ingestion_service import CsvIngestionService
+from app.schemas.fracfocus_sync import SyncResult, SyncStatusResponse, CsvFileStatus
 
 log = logging.getLogger(__name__)
 

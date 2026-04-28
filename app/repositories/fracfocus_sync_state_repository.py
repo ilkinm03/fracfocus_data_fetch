@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 from sqlalchemy.orm import Session
-from app.models.sync_state import SyncState, CsvFileState
+from app.models.fracfocus_sync_state import SyncState, CsvFileState
 
 log = logging.getLogger(__name__)
 

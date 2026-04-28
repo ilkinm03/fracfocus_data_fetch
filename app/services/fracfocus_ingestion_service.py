@@ -2,7 +2,7 @@ import csv
 import logging
 from pathlib import Path
 from app.repositories.fracfocus_repository import FracFocusRepository
-from app.repositories.sync_state_repository import CsvFileStateRepository
+from app.repositories.fracfocus_sync_state_repository import CsvFileStateRepository
 
 log = logging.getLogger(__name__)
 

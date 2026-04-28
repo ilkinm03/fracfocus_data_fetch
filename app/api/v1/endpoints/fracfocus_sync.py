@@ -1,8 +1,8 @@
 from datetime import datetime
 from fastapi import APIRouter, BackgroundTasks, Depends
 from app.api.dependencies import get_sync_service
-from app.schemas.sync import SyncStatusResponse, SyncTriggerResponse
-from app.services.sync_service import SyncService
+from app.schemas.fracfocus_sync import SyncStatusResponse, SyncTriggerResponse
+from app.services.fracfocus_sync_service import SyncService
 
 router = APIRouter(prefix="/sync", tags=["sync"])
 
