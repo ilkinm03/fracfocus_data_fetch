@@ -93,6 +93,7 @@ class TexNetService:
             # table stays Delaware-only per the trim rules.
             return None
         return {
+            "source": "texnet",
             "event_id": str(event_id),
             "magnitude": _to_float(attrs.get("Magnitude")),
             "mag_type": _to_str(attrs.get("MagType")),

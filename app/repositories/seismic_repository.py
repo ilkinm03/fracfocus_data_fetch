@@ -11,8 +11,8 @@ class SeismicEventRepository:
     def upsert_many(self, rows: list[dict[str, Any]]) -> tuple[int, int]:
         """
         Upserts events keyed on event_id. Returns (inserted, updated).
-        Done one-by-one because SQLite's ON CONFLICT support varies and the
-        catalog is small enough (low thousands) that bulk performance is fine.
+        Done row-by-row because the catalog is small enough (low thousands)
+        and SQLite's ON CONFLICT handling across versions is inconsistent.
         """
         if not rows:
             return 0, 0
@@ -40,8 +40,15 @@ class SeismicEventRepository:
         self.db.commit()
         return inserted, updated
 
-    def count(self, county: Optional[str] = None, min_magnitude: Optional[float] = None) -> int:
+    def count(
+        self,
+        source: Optional[str] = None,
+        county: Optional[str] = None,
+        min_magnitude: Optional[float] = None,
+    ) -> int:
         q = self.db.query(SeismicEvent)
+        if source:
+            q = q.filter(SeismicEvent.source == source.lower())
         if county:
             q = q.filter(SeismicEvent.county_name == county.upper())
         if min_magnitude is not None:
@@ -52,10 +59,13 @@ class SeismicEventRepository:
         self,
         page: int,
         page_size: int,
+        source: Optional[str] = None,
         county: Optional[str] = None,
         min_magnitude: Optional[float] = None,
     ) -> list[SeismicEvent]:
         q = self.db.query(SeismicEvent)
+        if source:
+            q = q.filter(SeismicEvent.source == source.lower())
         if county:
             q = q.filter(SeismicEvent.county_name == county.upper())
         if min_magnitude is not None:

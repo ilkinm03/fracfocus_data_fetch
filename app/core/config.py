@@ -23,6 +23,12 @@ class Settings(BaseSettings):
     TEXNET_BBOX_MIN_LON: float = -105.5
     TEXNET_BBOX_MAX_LON: float = -102.5
 
+    # USGS FDSN Event API — GeoJSON endpoint. Shares the TexNet bounding box.
+    USGS_FDSN_URL: str = "https://earthquake.usgs.gov/fdsnws/event/1/query"
+    USGS_MIN_MAGNITUDE: float = 1.5
+    # Default start date for historical coverage (pre-TexNet). ISO 8601 date string.
+    USGS_START_TIME: str = "2000-01-01"
+
     API_HOST: str = "0.0.0.0"
     API_PORT: int = 8000
     LOG_LEVEL: str = "INFO"

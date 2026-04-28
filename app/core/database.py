@@ -33,3 +33,36 @@ def init_db() -> None:
     from app.models import fracfocus_sync_state  # noqa: F401 — registers ORM models with Base
     from app.models import seismic_event  # noqa: F401
     Base.metadata.create_all(bind=engine)
+    _ensure_seismic_columns()
+
+
+def _ensure_seismic_columns() -> None:
+    """
+    Adds any columns present in the SeismicEvent model but absent from the
+    existing seismic_events table. Required because create_all() only creates
+    tables — it never alters an existing table to add new columns.
+    """
+    from sqlalchemy import text, inspect as sa_inspect
+    if not sa_inspect(engine).has_table("seismic_events"):
+        return
+    with engine.connect() as conn:
+        existing = {
+            row[1]
+            for row in conn.execute(text('PRAGMA table_info("seismic_events")')).fetchall()
+        }
+    from app.models.seismic_event import SeismicEvent
+    missing = [
+        col.key for col in SeismicEvent.__table__.columns
+        if col.key not in existing and col.key != "id"
+    ]
+    if not missing:
+        return
+    with engine.begin() as conn:
+        for col_key in missing:
+            col = SeismicEvent.__table__.columns[col_key]
+            col_type = col.type.compile(engine.dialect)
+            conn.execute(text(f'ALTER TABLE "seismic_events" ADD COLUMN "{col_key}" {col_type}'))
+    import logging
+    logging.getLogger(__name__).info(
+        f"seismic_events: added {len(missing)} new column(s): {missing}"
+    )

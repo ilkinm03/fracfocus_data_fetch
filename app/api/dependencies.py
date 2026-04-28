@@ -11,6 +11,7 @@ from app.services.fracfocus_download_service import DownloadService
 from app.services.fracfocus_ingestion_service import CsvIngestionService
 from app.services.fracfocus_sync_service import SyncService
 from app.services.texnet_service import TexNetService
+from app.services.usgs_service import USGSService
 
 
 def get_db() -> Generator[Session, None, None]:
@@ -39,6 +40,12 @@ def get_texnet_service(
     settings: Settings = Depends(get_settings),
 ) -> TexNetService:
     return TexNetService(settings)
+
+
+def get_usgs_service(
+    settings: Settings = Depends(get_settings),
+) -> USGSService:
+    return USGSService(settings)
 
 
 def get_seismic_repo(db: Session = Depends(get_db)) -> SeismicEventRepository:
