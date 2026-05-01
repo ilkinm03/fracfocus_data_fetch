@@ -1,8 +1,9 @@
 import logging
 from typing import Optional
 from fastapi import APIRouter, Depends, Query
-from app.api.dependencies import get_seismic_repo, get_texnet_service, get_usgs_service
+from app.api.dependencies import get_seismic_repo, get_texnet_service, get_usgs_service, get_sync_history_repo
 from app.repositories.seismic_repository import SeismicEventRepository
+from app.repositories.sync_history_repository import SyncHistoryRepository
 from app.schemas.seismic import SeismicEventListResponse, SeismicEventOut, SeismicFetchResult
 from app.services.texnet_service import TexNetService
 from app.services.usgs_service import USGSService
@@ -18,14 +19,18 @@ def fetch_texnet(
     ),
     texnet: TexNetService = Depends(get_texnet_service),
     repo: SeismicEventRepository = Depends(get_seismic_repo),
+    history_repo: SyncHistoryRepository = Depends(get_sync_history_repo),
 ):
+    hist = history_repo.create("texnet", "running")
     try:
         rows = texnet.fetch_delaware_events(min_magnitude=min_magnitude)
     except Exception as exc:
         log.exception("TexNet fetch failed")
+        history_repo.finish(hist.id, "failed", detail=str(exc))
         return SeismicFetchResult(status="failed", source="texnet", error=str(exc))
 
     inserted, updated = repo.upsert_many(rows)
+    history_repo.finish(hist.id, "success", rows_inserted=inserted, rows_updated=updated)
     return SeismicFetchResult(
         status="success",
         source="texnet",
@@ -46,14 +51,18 @@ def fetch_usgs(
     ),
     usgs: USGSService = Depends(get_usgs_service),
     repo: SeismicEventRepository = Depends(get_seismic_repo),
+    history_repo: SyncHistoryRepository = Depends(get_sync_history_repo),
 ):
+    hist = history_repo.create("usgs", "running")
     try:
         rows, pages = usgs.fetch_delaware_events(min_magnitude=min_magnitude)
     except Exception as exc:
         log.exception("USGS fetch failed")
+        history_repo.finish(hist.id, "failed", detail=str(exc))
         return SeismicFetchResult(status="failed", source="usgs", error=str(exc))
 
     inserted, updated = repo.upsert_many(rows)
+    history_repo.finish(hist.id, "success", rows_inserted=inserted, rows_updated=updated)
     return SeismicFetchResult(
         status="success",
         source="usgs",

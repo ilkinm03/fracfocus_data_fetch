@@ -33,17 +33,16 @@ def init_db() -> None:
     from app.models import fracfocus_sync_state  # noqa: F401 — registers ORM models with Base
     from app.models import seismic_event  # noqa: F401
     from app.models import iris_station  # noqa: F401
+    from app.models import swd  # noqa: F401
+    from app.models import sync_history  # noqa: F401
     Base.metadata.create_all(bind=engine)
     _ensure_seismic_columns()
     _ensure_iris_station_columns()
+    _ensure_swd_columns()
+    _ensure_sync_history_columns()
 
 
 def _ensure_seismic_columns() -> None:
-    """
-    Adds any columns present in the SeismicEvent model but absent from the
-    existing seismic_events table. Required because create_all() only creates
-    tables — it never alters an existing table to add new columns.
-    """
     from sqlalchemy import text, inspect as sa_inspect
     if not sa_inspect(engine).has_table("seismic_events"):
         return
@@ -71,11 +70,6 @@ def _ensure_seismic_columns() -> None:
 
 
 def _ensure_iris_station_columns() -> None:
-    """
-    Adds any columns present in the IRISStation model but absent from the
-    existing iris_stations table. Follows the same migration-free ALTER TABLE
-    pattern used for seismic_events.
-    """
     from sqlalchemy import text, inspect as sa_inspect
     if not sa_inspect(engine).has_table("iris_stations"):
         return
@@ -100,3 +94,64 @@ def _ensure_iris_station_columns() -> None:
     logging.getLogger(__name__).info(
         f"iris_stations: added {len(missing)} new column(s): {missing}"
     )
+
+
+def _ensure_swd_columns() -> None:
+    from sqlalchemy import text, inspect as sa_inspect
+    import logging
+    _log = logging.getLogger(__name__)
+
+    for table_name, model_cls_path in [
+        ("swd_wells", ("app.models.swd", "SWDWell")),
+        ("swd_monthly_monitor", ("app.models.swd", "SWDMonthlyMonitor")),
+        ("swd_fetch_checkpoint", ("app.models.swd", "SWDFetchCheckpoint")),
+    ]:
+        if not sa_inspect(engine).has_table(table_name):
+            continue
+        with engine.connect() as conn:
+            existing = {
+                row[1]
+                for row in conn.execute(text(f'PRAGMA table_info("{table_name}")')).fetchall()
+            }
+        import importlib
+        mod = importlib.import_module(model_cls_path[0])
+        model_cls = getattr(mod, model_cls_path[1])
+        missing = [
+            col.key for col in model_cls.__table__.columns
+            if col.key not in existing and col.key != "id"
+        ]
+        if not missing:
+            continue
+        with engine.begin() as conn:
+            for col_key in missing:
+                col = model_cls.__table__.columns[col_key]
+                col_type = col.type.compile(engine.dialect)
+                conn.execute(text(f'ALTER TABLE "{table_name}" ADD COLUMN "{col_key}" {col_type}'))
+        _log.info(f"{table_name}: added {len(missing)} new column(s): {missing}")
+
+
+def _ensure_sync_history_columns() -> None:
+    from sqlalchemy import text, inspect as sa_inspect
+    import logging
+    _log = logging.getLogger(__name__)
+
+    if not sa_inspect(engine).has_table("sync_history"):
+        return
+    with engine.connect() as conn:
+        existing = {
+            row[1]
+            for row in conn.execute(text('PRAGMA table_info("sync_history")')).fetchall()
+        }
+    from app.models.sync_history import SyncHistory
+    missing = [
+        col.key for col in SyncHistory.__table__.columns
+        if col.key not in existing and col.key != "id"
+    ]
+    if not missing:
+        return
+    with engine.begin() as conn:
+        for col_key in missing:
+            col = SyncHistory.__table__.columns[col_key]
+            col_type = col.type.compile(engine.dialect)
+            conn.execute(text(f'ALTER TABLE "sync_history" ADD COLUMN "{col_key}" {col_type}'))
+    _log.info(f"sync_history: added {len(missing)} new column(s): {missing}")

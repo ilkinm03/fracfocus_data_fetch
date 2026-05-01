@@ -32,6 +32,12 @@ class Settings(BaseSettings):
     # EarthScope (IRIS) FDSN Station API — pipe-delimited text endpoint.
     IRIS_STATION_URL: str = "https://service.iris.edu/fdsnws/station/1/query"
 
+    # RRC SWD — Texas Open Data Portal (Socrata). Dataset IDs are stable permanent identifiers.
+    RRC_UIC_URL: str = "https://data.texas.gov/resource/givw-z9t4.json"
+    RRC_H10_URL: str = "https://data.texas.gov/resource/qq2j-f2zm.json"
+    # Optional Socrata app token — removes rate limiting. Register free at data.texas.gov.
+    SOCRATA_APP_TOKEN: str = ""
+
     API_HOST: str = "0.0.0.0"
     API_PORT: int = 8000
     LOG_LEVEL: str = "INFO"

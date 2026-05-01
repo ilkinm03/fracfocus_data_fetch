@@ -2,10 +2,12 @@ import logging
 import threading
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 from sqlalchemy.orm import Session
 from app.core.config import Settings
 from app.repositories.fracfocus_repository import FracFocusRepository
 from app.repositories.fracfocus_sync_state_repository import SyncStateRepository, CsvFileStateRepository
+from app.repositories.sync_history_repository import SyncHistoryRepository
 from app.services.fracfocus_download_service import DownloadService
 from app.services.fracfocus_ingestion_service import CsvIngestionService
 from app.schemas.fracfocus_sync import SyncResult, SyncStatusResponse, CsvFileStatus
@@ -24,6 +26,7 @@ class SyncService:
         ingestion_svc: CsvIngestionService,
         sync_state_repo: SyncStateRepository,
         csv_file_state_repo: CsvFileStateRepository,
+        history_repo: SyncHistoryRepository,
         settings: Settings,
     ) -> None:
         self.db = db
@@ -31,23 +34,26 @@ class SyncService:
         self.ingestion_svc = ingestion_svc
         self.sync_state_repo = sync_state_repo
         self.csv_file_state_repo = csv_file_state_repo
+        self.history_repo = history_repo
         self.settings = settings
 
     def is_running(self) -> bool:
         return _is_running
 
-    def run_sync(self) -> SyncResult:
+    def run_sync(self, history_id: Optional[int] = None) -> SyncResult:
         global _is_running
         with _sync_lock:
             if _is_running:
                 return SyncResult(status="already_running", reason="Sync already in progress")
             _is_running = True
+        if history_id is not None:
+            self.history_repo.mark_running(history_id)
         try:
-            return self._do_sync()
+            return self._do_sync(history_id=history_id)
         finally:
             _is_running = False
 
-    def _do_sync(self) -> SyncResult:
+    def _do_sync(self, history_id: Optional[int] = None) -> SyncResult:
         url = self.settings.ZIP_URL
         self.sync_state_repo.set_status(url, "running")
 
@@ -62,6 +68,11 @@ class SyncService:
 
             if not changed:
                 self.sync_state_repo.set_status(url, "success", sync_time=datetime.utcnow())
+                if history_id is not None:
+                    self.history_repo.finish(
+                        history_id, "skipped",
+                        detail="ETag and Last-Modified unchanged — no new data",
+                    )
                 return SyncResult(
                     status="skipped",
                     reason="ETag and Last-Modified unchanged — no new data",
@@ -82,6 +93,11 @@ class SyncService:
             if not changed_infos:
                 self.sync_state_repo.upsert(url, new_etag, new_last_modified)
                 self.sync_state_repo.set_status(url, "success", sync_time=datetime.utcnow())
+                if history_id is not None:
+                    self.history_repo.finish(
+                        history_id, "skipped",
+                        detail="ZIP changed but all CSV files are identical",
+                    )
                 return SyncResult(
                     status="skipped",
                     reason="ZIP changed but all CSV files are identical",
@@ -105,6 +121,12 @@ class SyncService:
             # 7. Persist new ETag / Last-Modified and mark sync successful
             self.sync_state_repo.upsert(url, new_etag, new_last_modified)
             self.sync_state_repo.set_status(url, "success", sync_time=datetime.utcnow())
+            if history_id is not None:
+                self.history_repo.finish(
+                    history_id, "success",
+                    rows_inserted=total_rows,
+                    detail=f"files_processed={len(changed_infos)}",
+                )
 
             return SyncResult(
                 status="success",
@@ -115,6 +137,8 @@ class SyncService:
         except Exception as exc:
             log.exception("Sync failed")
             self.sync_state_repo.set_status(url, "failed", error=str(exc))
+            if history_id is not None:
+                self.history_repo.finish(history_id, "failed", detail=str(exc))
             return SyncResult(status="failed", error=str(exc))
 
     def get_status(self) -> SyncStatusResponse:

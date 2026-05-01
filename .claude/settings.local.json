@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:data.texas.gov)",
+      "WebSearch",
+      "WebFetch(domain:webapps.rrc.state.tx.us)",
+      "WebFetch(domain:www.wellwiki.org)",
+      "WebFetch(domain:www.rrc.texas.gov)",
+      "Bash(uv run *)",
+      "Bash(taskkill *)",
+      "Bash(uv sync *)",
+      "Bash(unzip -p Delaware_PoC_Data_Plan_Enhanced.docx word/document.xml)",
+      "Bash(python3)",
+      "Read(//c/c/Users/nihad/Desktop/fracfocus_data_fetch/documents/**)"
+    ]
+  }
+}

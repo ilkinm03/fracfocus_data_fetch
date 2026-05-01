@@ -14,6 +14,10 @@ from app.services.texnet_service import TexNetService
 from app.services.usgs_service import USGSService
 from app.services.iris_service import IRISService
 from app.repositories.iris_repository import IRISStationRepository
+from app.repositories.swd_repository import SWDRepository
+from app.repositories.sync_history_repository import SyncHistoryRepository
+from app.services.uic_service import UICService
+from app.services.h10_service import H10Service
 
 
 def get_db() -> Generator[Session, None, None]:
@@ -64,6 +68,26 @@ def get_seismic_repo(db: Session = Depends(get_db)) -> SeismicEventRepository:
     return SeismicEventRepository(db)
 
 
+def get_uic_service(
+    settings: Settings = Depends(get_settings),
+) -> UICService:
+    return UICService(settings)
+
+
+def get_h10_service(
+    settings: Settings = Depends(get_settings),
+) -> H10Service:
+    return H10Service(settings)
+
+
+def get_swd_repo(db: Session = Depends(get_db)) -> SWDRepository:
+    return SWDRepository(db)
+
+
+def get_sync_history_repo(db: Session = Depends(get_db)) -> SyncHistoryRepository:
+    return SyncHistoryRepository(db)
+
+
 def get_sync_service(
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
@@ -73,11 +97,13 @@ def get_sync_service(
 ) -> SyncService:
     ingestion_svc = CsvIngestionService(fracfocus_repo, csv_file_state_repo)
     sync_state_repo = SyncStateRepository(db)
+    history_repo = SyncHistoryRepository(db)
     return SyncService(
         db=db,
         download_svc=download_svc,
         ingestion_svc=ingestion_svc,
         sync_state_repo=sync_state_repo,
         csv_file_state_repo=csv_file_state_repo,
+        history_repo=history_repo,
         settings=settings,
     )

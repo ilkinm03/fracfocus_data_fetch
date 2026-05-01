@@ -18,6 +18,7 @@ def _run_scheduled_sync() -> None:
     """
     from app.repositories.fracfocus_repository import FracFocusRepository
     from app.repositories.fracfocus_sync_state_repository import SyncStateRepository, CsvFileStateRepository
+    from app.repositories.sync_history_repository import SyncHistoryRepository
     from app.services.fracfocus_download_service import DownloadService
     from app.services.fracfocus_ingestion_service import CsvIngestionService
     from app.services.fracfocus_sync_service import SyncService
@@ -29,15 +30,18 @@ def _run_scheduled_sync() -> None:
         csv_file_state_repo = CsvFileStateRepository(db)
         ingestion_svc = CsvIngestionService(fracfocus_repo, csv_file_state_repo)
         sync_state_repo = SyncStateRepository(db)
+        history_repo = SyncHistoryRepository(db)
+        hist = history_repo.create("fracfocus", "pending")
         svc = SyncService(
             db=db,
             download_svc=DownloadService(settings),
             ingestion_svc=ingestion_svc,
             sync_state_repo=sync_state_repo,
             csv_file_state_repo=csv_file_state_repo,
+            history_repo=history_repo,
             settings=settings,
         )
-        result = svc.run_sync()
+        result = svc.run_sync(history_id=hist.id)
         log.info(f"Scheduled sync completed: {result}")
     except Exception:
         log.exception("Scheduled sync raised an unexpected error")
