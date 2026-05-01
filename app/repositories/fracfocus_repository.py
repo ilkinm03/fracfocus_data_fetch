@@ -1,7 +1,8 @@
 import csv
 import logging
+from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Union
 from sqlalchemy import text, inspect as sa_inspect
 from sqlalchemy.engine import Engine
 
@@ -120,6 +121,106 @@ class FracFocusRepository:
             ).mappings().all()
 
         return total, [dict(row) for row in rows]
+
+    def find_nearby(
+        self,
+        min_lat: float,
+        max_lat: float,
+        min_lon: float,
+        max_lon: float,
+        start_date: Union[date, datetime],
+        end_date: Union[date, datetime],
+    ) -> list[dict[str, Any]]:
+        """Returns frac jobs whose lat/lon fall within the bounding box and whose
+        job_start_date falls within [start_date, end_date]. Column names used here
+        are the normalised form produced by CsvIngestionService.infer_columns().
+        Returns empty list if the table doesn't exist or required columns are absent."""
+        if not self.table_exists():
+            return []
+
+        cols = set(self.get_table_columns())
+        lat_col = "latitude"
+        lon_col = "longitude"
+        start_col = "jobstartdate"
+        if lat_col not in cols or lon_col not in cols or start_col not in cols:
+            return []
+
+        # FracFocus bulk CSV is flattened: one row per ingredient per job.
+        # Deduplicate on (apinumber, jobstartdate) using GROUP BY so the service
+        # receives one dict per job, not one per chemical disclosure line.
+        # Column names are from CsvIngestionService.infer_columns() normalisation:
+        #   TotalBaseWaterVolume → totalbasewatervolume  (NOT totalwatervolume)
+        #   TVD                  → tvd                   (NOT formationdepth)
+        select_cols = [lat_col, lon_col, start_col]
+        optional = [
+            "apinumber", "jobenddate", "operatorname", "wellname",
+            "totalbasewatervolume", "tvd",
+        ]
+        for c in optional:
+            if c in cols:
+                select_cols.append(c)
+
+        col_sql = ", ".join(f'"{c}"' for c in select_cols)
+
+        # Date filtering is done in Python after the spatial fetch because FracFocus
+        # stores dates in US locale format ("M/D/YYYY H:MM:SS AM/PM") which does not
+        # sort correctly as a plain string — ISO comparison would silently exclude or
+        # include wrong rows.
+        sql = text(
+            f'SELECT {col_sql} FROM "{TABLE_NAME}"'
+            f' WHERE "{lat_col}" IS NOT NULL AND "{lon_col}" IS NOT NULL'
+            f' AND "{lat_col}" != \'\' AND "{lon_col}" != \'\''
+            f' AND CAST("{lat_col}" AS REAL) >= :min_lat'
+            f' AND CAST("{lat_col}" AS REAL) <= :max_lat'
+            f' AND CAST("{lon_col}" AS REAL) >= :min_lon'
+            f' AND CAST("{lon_col}" AS REAL) <= :max_lon'
+            f' GROUP BY {col_sql}'
+        )
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                sql,
+                {
+                    "min_lat": min_lat,
+                    "max_lat": max_lat,
+                    "min_lon": min_lon,
+                    "max_lon": max_lon,
+                },
+            ).mappings().all()
+
+        # Parse dates and apply window filter in Python.
+        start_dt = start_date if isinstance(start_date, datetime) else datetime.combine(start_date, datetime.min.time())
+        end_dt = end_date if isinstance(end_date, datetime) else datetime.combine(end_date, datetime.max.time())
+
+        _DATE_FMTS = [
+            "%m/%d/%Y %I:%M:%S %p",  # 3/25/2011 12:00:00 AM
+            "%m/%d/%Y %H:%M:%S",     # 3/25/2011 00:00:00
+            "%Y-%m-%dT%H:%M:%S",     # ISO fallback
+            "%Y-%m-%d",
+        ]
+
+        def _parse(raw: Any) -> Optional[datetime]:
+            if not raw:
+                return None
+            s = str(raw).strip()
+            for fmt in _DATE_FMTS:
+                try:
+                    return datetime.strptime(s, fmt)
+                except ValueError:
+                    continue
+            return None
+
+        result = []
+        seen: set[tuple] = set()
+        for r in rows:
+            d = _parse(r.get(start_col))
+            if d is None or not (start_dt <= d <= end_dt):
+                continue
+            key = (r.get("apinumber", ""), r.get(start_col, ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(dict(r))
+        return result
 
     def replace_csv_data(
         self, csv_path: Path, columns: list[str], batch_size: int = 5000

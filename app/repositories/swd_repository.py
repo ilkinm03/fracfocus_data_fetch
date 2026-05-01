@@ -60,6 +60,46 @@ class SWDRepository:
     def count_wells(self) -> int:
         return self.db.query(SWDWell).count()
 
+    def find_wells_in_bbox(
+        self,
+        min_lat: float,
+        max_lat: float,
+        min_lon: float,
+        max_lon: float,
+    ) -> list[SWDWell]:
+        """Returns all wells whose lat/lon fall within the bounding box.
+        Caller applies haversine filtering on the returned list."""
+        return (
+            self.db.query(SWDWell)
+            .filter(
+                SWDWell.latitude.isnot(None),
+                SWDWell.longitude.isnot(None),
+                SWDWell.latitude >= min_lat,
+                SWDWell.latitude <= max_lat,
+                SWDWell.longitude >= min_lon,
+                SWDWell.longitude <= max_lon,
+            )
+            .all()
+        )
+
+    def get_monitoring_window(
+        self,
+        uic_no: str,
+        start: datetime,
+        end: datetime,
+    ) -> list[SWDMonthlyMonitor]:
+        """Returns H-10 monthly records for a single well in [start, end]."""
+        return (
+            self.db.query(SWDMonthlyMonitor)
+            .filter(
+                SWDMonthlyMonitor.uic_no == uic_no,
+                SWDMonthlyMonitor.report_date >= start,
+                SWDMonthlyMonitor.report_date <= end,
+            )
+            .order_by(SWDMonthlyMonitor.report_date)
+            .all()
+        )
+
     def get_wells_paginated(self, page: int, page_size: int) -> list[SWDWell]:
         return (
             self.db.query(SWDWell)

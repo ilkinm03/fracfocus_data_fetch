@@ -38,6 +38,15 @@ class Settings(BaseSettings):
     # Optional Socrata app token — removes rate limiting. Register free at data.texas.gov.
     SOCRATA_APP_TOKEN: str = ""
 
+    # Event-context assembly search-window defaults (all overridable per request).
+    # SWD: 20 km / 10-year window — pressure fronts migrate far and slowly (Smye 2024).
+    # Frac: 10 km / 2-year window — poroelastic stress is shorter-range and transient.
+    ANALYSIS_SWD_RADIUS_KM: float = 20.0
+    ANALYSIS_SWD_WINDOW_DAYS: int = 3650
+    ANALYSIS_FRAC_RADIUS_KM: float = 10.0
+    ANALYSIS_FRAC_WINDOW_DAYS: int = 730
+    ANALYSIS_STATION_RADIUS_KM: float = 50.0
+
     API_HOST: str = "0.0.0.0"
     API_PORT: int = 8000
     LOG_LEVEL: str = "INFO"

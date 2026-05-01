@@ -55,6 +55,13 @@ class SeismicEventRepository:
             q = q.filter(SeismicEvent.magnitude >= min_magnitude)
         return q.count()
 
+    def get_by_event_id(self, event_id: str) -> Optional[SeismicEvent]:
+        return (
+            self.db.query(SeismicEvent)
+            .filter(SeismicEvent.event_id == event_id)
+            .first()
+        )
+
     def get_paginated(
         self,
         page: int,

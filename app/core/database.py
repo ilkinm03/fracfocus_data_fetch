@@ -35,11 +35,13 @@ def init_db() -> None:
     from app.models import iris_station  # noqa: F401
     from app.models import swd  # noqa: F401
     from app.models import sync_history  # noqa: F401
+    from app.models import event_context  # noqa: F401
     Base.metadata.create_all(bind=engine)
     _ensure_seismic_columns()
     _ensure_iris_station_columns()
     _ensure_swd_columns()
     _ensure_sync_history_columns()
+    _ensure_event_context_columns()
 
 
 def _ensure_seismic_columns() -> None:
@@ -128,6 +130,33 @@ def _ensure_swd_columns() -> None:
                 col_type = col.type.compile(engine.dialect)
                 conn.execute(text(f'ALTER TABLE "{table_name}" ADD COLUMN "{col_key}" {col_type}'))
         _log.info(f"{table_name}: added {len(missing)} new column(s): {missing}")
+
+
+def _ensure_event_context_columns() -> None:
+    from sqlalchemy import text, inspect as sa_inspect
+    import logging
+    _log = logging.getLogger(__name__)
+
+    if not sa_inspect(engine).has_table("event_context_snapshot"):
+        return
+    with engine.connect() as conn:
+        existing = {
+            row[1]
+            for row in conn.execute(text('PRAGMA table_info("event_context_snapshot")')).fetchall()
+        }
+    from app.models.event_context import EventContextSnapshot
+    missing = [
+        col.key for col in EventContextSnapshot.__table__.columns
+        if col.key not in existing and col.key != "id"
+    ]
+    if not missing:
+        return
+    with engine.begin() as conn:
+        for col_key in missing:
+            col = EventContextSnapshot.__table__.columns[col_key]
+            col_type = col.type.compile(engine.dialect)
+            conn.execute(text(f'ALTER TABLE "event_context_snapshot" ADD COLUMN "{col_key}" {col_type}'))
+    _log.info(f"event_context_snapshot: added {len(missing)} new column(s): {missing}")
 
 
 def _ensure_sync_history_columns() -> None:

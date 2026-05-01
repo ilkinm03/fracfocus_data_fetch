@@ -18,6 +18,9 @@ from app.repositories.swd_repository import SWDRepository
 from app.repositories.sync_history_repository import SyncHistoryRepository
 from app.services.uic_service import UICService
 from app.services.h10_service import H10Service
+from app.repositories.event_context_repository import EventContextRepository
+from app.services.event_context_service import EventContextService
+from app.services.attribution_service import HeuristicAttributionService
 
 
 def get_db() -> Generator[Session, None, None]:
@@ -86,6 +89,25 @@ def get_swd_repo(db: Session = Depends(get_db)) -> SWDRepository:
 
 def get_sync_history_repo(db: Session = Depends(get_db)) -> SyncHistoryRepository:
     return SyncHistoryRepository(db)
+
+
+def get_event_context_repo(db: Session = Depends(get_db)) -> EventContextRepository:
+    return EventContextRepository(db)
+
+
+def get_event_context_service(
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> EventContextService:
+    seismic_repo = SeismicEventRepository(db)
+    swd_repo = SWDRepository(db)
+    fracfocus_repo = FracFocusRepository(engine)
+    iris_repo = IRISStationRepository(db)
+    return EventContextService(seismic_repo, swd_repo, fracfocus_repo, iris_repo, settings)
+
+
+def get_attribution_service() -> HeuristicAttributionService:
+    return HeuristicAttributionService()
 
 
 def get_sync_service(

@@ -33,6 +33,22 @@ curl -X POST "http://localhost:8000/api/v1/seismic/usgs/fetch?min_magnitude=1.5"
 
 # EarthScope (IRIS) seismic station metadata (Delaware Basin bbox)
 curl -X POST http://localhost:8000/api/v1/seismic/iris/stations/fetch
+
+# SWD well inventory (run once; resumes from checkpoint if interrupted)
+curl -X POST http://localhost:8000/api/v1/swd/uic/fetch
+
+# SWD monthly injection monitor (run after uic/fetch)
+curl -X POST http://localhost:8000/api/v1/swd/h10/fetch
+```
+
+Trigger event-context assembly and attribution analysis:
+
+```bash
+# Assemble nearby SWD + frac + station context for a seismic event (read-only, no snapshot)
+curl "http://localhost:8000/api/v1/analysis/events/{event_id}/context?swd_radius_km=20&swd_window_days=3650"
+
+# Run heuristic attribution + persist snapshot
+curl -X POST "http://localhost:8000/api/v1/analysis/events/{event_id}/analyze"
 ```
 
 `pytest` and `httpx` are declared as dev deps but **no test suite exists yet** — there's nothing to run.
@@ -46,6 +62,11 @@ Delaware Basin PoC: correlate seismic events with nearby saltwater disposal (SWD
 - Seismic: TexNet ArcGIS REST → `seismic_events` table (tagged `source="texnet"`)
 - Seismic: USGS FDSN GeoJSON → `seismic_events` table (tagged `source="usgs"`)
 - Seismic: EarthScope (IRIS) FDSN Station metadata → `iris_stations` table
+- SWD: RRC UIC well inventory → `swd_wells` table
+- SWD: RRC H-10 monthly injection monitor → `swd_monthly_monitor` table
+
+**Implemented analysis layer:**
+- Event-context assembly + heuristic attribution → `event_context_snapshot` table
 
 ## Architecture
 
@@ -74,6 +95,23 @@ POST /api/v1/seismic/usgs/fetch
 POST /api/v1/seismic/iris/stations/fetch
   └── IRISService → IRISStationRepository → iris_stations table
 GET  /api/v1/seismic/iris/stations   (paginated, ?network=TX&active_only=true)
+```
+
+**SWD pipeline** (SWD bucket):
+```
+POST /api/v1/swd/uic/fetch
+  └── UICService → SWDRepository.upsert_wells() → swd_wells table  (checkpoint-resumable)
+POST /api/v1/swd/h10/fetch
+  └── H10Service → SWDRepository.upsert_monitoring() → swd_monthly_monitor table  (checkpoint-resumable)
+```
+
+**Analysis pipeline** (PoC workflow — reads across all buckets):
+```
+GET  /api/v1/analysis/events/{event_id}/context
+POST /api/v1/analysis/events/{event_id}/analyze
+  └── EventContextService.assemble()   → EventContextOut (spatial + temporal join)
+  └── HeuristicAttributionService.score()  → AttributionResult  (engine="heuristic_v0")
+  └── EventContextRepository.save_snapshot() → event_context_snapshot table
 ```
 
 All pipelines share the same SQLite file, engine, and `SessionLocal`. The two seismic event pipelines write to the same `seismic_events` table, distinguished by the `source` column. IRIS station metadata has its own dedicated `iris_stations` table. Only FracFocus has a cron; all seismic fetches are manual.
@@ -146,3 +184,46 @@ Preserve the invariant: `sync_state.etag` is written **only after** all CSVs suc
 | `USGS_MIN_MAGNITUDE` | `1.5` | Default floor when not passed as a query param |
 | `USGS_START_TIME` | `2000-01-01` | **Must be set** — without it USGS returns only the last 30 days |
 | `IRIS_STATION_URL` | `https://service.iris.edu/fdsnws/station/1/query` | EarthScope FDSN Station API endpoint |
+| `RRC_UIC_URL` | `https://data.texas.gov/resource/givw-z9t4.json` | Socrata UIC well inventory — dataset ID `givw-z9t4` |
+| `RRC_H10_URL` | `https://data.texas.gov/resource/qq2j-f2zm.json` | Socrata H-10 monthly monitor — dataset ID `qq2j-f2zm` |
+| `SOCRATA_APP_TOKEN` | `""` | Optional; removes rate limiting (register free at data.texas.gov) |
+| `ANALYSIS_SWD_RADIUS_KM` | `20.0` | Default SWD search radius; override per request |
+| `ANALYSIS_SWD_WINDOW_DAYS` | `3650` | Default SWD lookback (10 yrs); pressure fronts migrate slowly |
+| `ANALYSIS_FRAC_RADIUS_KM` | `10.0` | Default frac search radius; poroelastic stress is shorter-range |
+| `ANALYSIS_FRAC_WINDOW_DAYS` | `730` | Default frac lookback (2 yrs) |
+| `ANALYSIS_STATION_RADIUS_KM` | `50.0` | Default IRIS station search radius (source-receiver geometry context) |
+
+## Analysis pipeline — event-context assembly + attribution
+
+### Architecture
+
+```
+GET  /api/v1/analysis/events/{event_id}/context
+POST /api/v1/analysis/events/{event_id}/analyze
+  └── EventContextService.assemble()
+        ├── SeismicEventRepository.get_by_event_id()   → event lat/lon/date
+        ├── SWDRepository.find_wells_in_bbox()
+        │     + SWDRepository.get_monitoring_window()  → per-well H-10 timeseries
+        ├── FracFocusRepository.find_nearby()          → frac jobs in bbox + time window
+        └── IRISStationRepository.find_stations_in_bbox()
+  └── (POST only) HeuristicAttributionService.score()  → AttributionResult
+  └── (POST only) EventContextRepository.save_snapshot() → event_context_snapshot table
+```
+
+### Heuristic attribution engine seam
+
+`HeuristicAttributionService` (`app/services/attribution_service.py`) is a placeholder for Travis Walla's Permian physics engine. It uses distance-weighted injection volume / water volume with exponential decay:
+
+- SWD score = Σ(cumulative_bbl × exp(−distance_km / 10))
+- Frac score = Σ(water_vol × exp(−distance_km / 3))
+- Engine label: `"heuristic_v0"`
+
+To swap in the real engine: register a `PhysicsAttributionService` with the same `score(context: EventContextOut) -> AttributionResult` interface in `app/services/` and update the `get_attribution_service` factory in `app/api/dependencies.py`. No endpoint or schema changes needed.
+
+### `event_context_snapshot` table migration
+
+`_ensure_event_context_columns()` in `app/core/database.py` follows the same `PRAGMA table_info` + `ALTER TABLE ADD COLUMN` pattern as the other ORM tables. Called from `init_db()`. Every analysis run appends a new row — existing snapshots are never mutated.
+
+### FracFocus spatial query — column-name safety
+
+`FracFocusRepository.find_nearby()` checks `get_table_columns()` before querying. FracFocus CSV headers are normalised to lowercase-no-spaces by `CsvIngestionService.infer_columns()` — so `JobStartDate` becomes `jobstartdate`, `Latitude` becomes `latitude`, etc. If those columns are absent the method returns `[]` safely. Only bind-parameter values are user-supplied; column names are hardcoded quoted identifiers (no injection surface).

@@ -37,6 +37,27 @@ class IRISStationRepository:
         self.db.commit()
         return inserted, updated
 
+    def find_stations_in_bbox(
+        self,
+        min_lat: float,
+        max_lat: float,
+        min_lon: float,
+        max_lon: float,
+    ) -> list[IRISStation]:
+        """Returns stations within the bounding box. Caller haversine-filters the result."""
+        return (
+            self.db.query(IRISStation)
+            .filter(
+                IRISStation.latitude.isnot(None),
+                IRISStation.longitude.isnot(None),
+                IRISStation.latitude >= min_lat,
+                IRISStation.latitude <= max_lat,
+                IRISStation.longitude >= min_lon,
+                IRISStation.longitude <= max_lon,
+            )
+            .all()
+        )
+
     def count(self, network: Optional[str] = None, active_only: bool = False) -> int:
         q = self.db.query(IRISStation)
         if network:
