@@ -372,7 +372,7 @@ All settings live in a `.env` file and are loaded once at startup via `pydantic-
 
 ## The Attribution Engine — Current State and Future Path
 
-The current engine is `heuristic_v4`. The engine label is stored on every `event_context_snapshot` row, so historical analyses remain correctly tagged even after the engine is upgraded.
+The active engine is `physics_v1`. The engine label is stored on every `event_context_snapshot` row, so historical analyses remain correctly tagged even after the engine is upgraded. The heuristic engine (`heuristic_v4`) is still available and can be restored by editing `app/api/dependencies.py`.
 
 ### Version history
 
@@ -428,22 +428,53 @@ Defaults to 1.0 (neutral) when fewer than 4 H-10 records exist in the window, or
 
 ---
 
+#### `physics_v1` — pore-pressure diffusion model *(active engine)*
+**SWD weight replaces all spatial/temporal decay:**
+```
+erfc( r_m / 2√(D · t_inject_s) )
+```
+where `D = 0.5 m²/s` (hydraulic diffusivity), `r_m` = distance in metres, `t_inject_s` = estimated injection duration in seconds.
+
+The complementary error function (`erfc`) is derived from Shapiro et al. (1997) and Biot diffusion theory. It captures the physically correct time–distance interaction that the heuristic model cannot:
+
+| Scenario | Heuristic v4 weight | Physics v1 weight |
+|---|---|---|
+| Well 5 km away, injecting 6 months | `exp(−5/10) × exp(−180/365)` ≈ 0.33 | `erfc(5000 / 2√(0.5 × 15.8M))` ≈ 0.21 |
+| Well 5 km away, injecting 5 years | same 0.33 (time decay different only) | `erfc(5000 / 2√(0.5 × 157.8M))` ≈ 0.73 |
+| Well 15 km away, injecting 1 year | `exp(−15/10) × ...` ≈ 0.13 | `erfc(15000 / 2√(0.5 × 31.6M))` ≈ 0.008 |
+| Well 15 km away, injecting 5 years | same range | `erfc(15000 / 2√(0.5 × 157.8M))` ≈ 0.23 |
+
+The key insight: **a well 15 km away that has only been injecting for 1 year scores ~0.008** (the pressure front has traveled only ~14 km). The heuristic model would score it at ~0.13 regardless of injection history. After 5 years of injection that same well rises to ~0.23 as the pressure front reaches 31 km.
+
+**Injection duration** is estimated from `first_report_date` (earliest H-10 record within the search window) to the event date. Falls back to `monthly_record_count × 30.44 days` if the date is unavailable. Duration is capped at the window length (10 years by default).
+
+**Signal descriptions** now include the pressure front radius: `"pressure front ≈14.1 km, erfc=0.0076"` — investigators can immediately see whether a well's pressure could have physically reached the earthquake at the time it occurred.
+
+**Frac scoring**, depth mismatch, and rate-change boost are inherited unchanged from `heuristic_v4`.
+
+**Hydraulic diffusivity D** defaults to `0.5 m²/s` (geometric mean of the 0.1–1.0 m²/s range reported by Smye et al. 2024 for Delaware Basin formations). Calibrate with `scripts/calibrate_engine.py --engine physics`.
+
+**What changed in practice:** a well 15 km away with 1 year of injection history now scores ~17× lower than it did under `heuristic_v4`. Wells with long injection histories near the earthquake score meaningfully higher. Time and distance interact — neither alone determines the score.
+
+---
+
 ### Factors at a glance
 
-| Factor | v0 | v1 | v2 | v3 | v4 |
-|---|:---:|:---:|:---:|:---:|:---:|
-| Spatial decay (SWD, λ=10 km) | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Spatial decay (frac, λ=3 km) | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Temporal decay (SWD, λ=365 d) | — | ✓ | ✓ | ✓ | ✓ |
-| Depth mismatch penalty (σ=3 km) | — | — | ✓ | ✓ | ✓ |
-| Log-odds confidence metric | — | — | — | ✓ | ✓ |
-| Rate-change boost (SWD, cap ×3) | — | — | — | — | ✓ |
+| Factor | h\_v0 | h\_v1 | h\_v2 | h\_v3 | h\_v4 | p\_v1 |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|
+| Spatial decay SWD `exp(−r/λ)` | ✓ | ✓ | ✓ | ✓ | ✓ | — |
+| Temporal decay SWD `exp(−t/λ)` | — | ✓ | ✓ | ✓ | ✓ | — |
+| Pore-pressure diffusion `erfc(r/2√Dt)` | — | — | — | — | — | ✓ |
+| Depth mismatch penalty (σ=3 km) | — | — | ✓ | ✓ | ✓ | ✓ |
+| Log-odds confidence metric | — | — | — | ✓ | ✓ | ✓ |
+| Rate-change boost (cap ×3) | — | — | — | — | ✓ | ✓ |
+| Spatial decay frac `exp(−r/λ)` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
 ### Planned improvements (not yet implemented)
 
 - ~~**Injection rate change signal**~~ — implemented in `heuristic_v4`
 - ~~**Calibrated λ parameters**~~ — calibration infrastructure implemented (see below); apply after collecting ground truth labels
-- **Pore-pressure diffusion model** — replace the static spatial decay with a time-dependent diffusion equation (hydraulic diffusivity ~0.1–1.0 m²/s), capturing how pressure waves propagate outward from a well over months to years
+- ~~**Pore-pressure diffusion model**~~ — implemented as `physics_v1` (see below)
 - **Coulomb stress transfer for frac** — model stress changes on nearby faults using focal mechanism data from the TexNet catalog
 
 ### Parameter calibration
@@ -453,11 +484,14 @@ All engine parameters (`swd_lambda_km`, `frac_lambda_km`, `time_lambda_days`, `d
 The calibration script `scripts/calibrate_engine.py` performs a grid search over these parameters and ranks combinations by binary log-loss against a ground truth CSV:
 
 ```bash
-# Run grid search and print top 10 combinations
+# Calibrate heuristic engine (900 combinations: swd_λ, frac_λ, time_λ, depth_σ)
 python scripts/calibrate_engine.py data/ground_truth.csv
 
+# Calibrate physics engine (150 combinations: D, frac_λ, depth_σ)
+python scripts/calibrate_engine.py data/ground_truth.csv --engine physics
+
 # Also write full results to JSON
-python scripts/calibrate_engine.py data/ground_truth.csv --top 20 --output results.json
+python scripts/calibrate_engine.py data/ground_truth.csv --engine physics --top 20 --output results.json
 ```
 
 **Ground truth CSV format** (`data/ground_truth_template.csv` is a starting point):
@@ -535,7 +569,7 @@ The interactive API docs are available at `http://localhost:8000/docs` once the 
 
 - **SQLite**: The database is a single local file. This is appropriate for a proof-of-concept but would need to be replaced (PostgreSQL with PostGIS) for production-scale concurrent access.
 - **No spatial index**: Proximity queries use bounding-box filtering on raw lat/lon columns, then compute exact distances in Python. This is fast enough for the current data volume but would not scale to millions of rows.
-- **Attribution is heuristic**: The `heuristic_v4` engine applies spatial decay, temporal decay, a depth mismatch penalty, an injection rate-change boost, and a probabilistic confidence metric, but does not model subsurface physics. It is a defensible first approximation, not a peer-reviewed geophysical model.
+- **Attribution model**: The active engine `physics_v1` uses pore-pressure diffusion (`erfc`) for SWD and exponential spatial decay for frac. It assumes a single homogeneous diffusivity value — real formations are heterogeneous, anisotropic, and faulted. Results should be treated as informed estimates, not certified attributions.
 - **FracFocus coverage**: FracFocus disclosure is mandatory in Texas but not all operators comply immediately. Some jobs may be missing or delayed.
 - **TexNet coverage gap**: TexNet was deployed in 2017. Events before that date come from USGS, which has lower magnitude completeness in this region for the pre-TexNet era.
 - **No authentication**: The API has no authentication layer. It should not be exposed publicly without adding one.

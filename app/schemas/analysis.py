@@ -20,6 +20,8 @@ class NearbySWDWell(BaseModel):
     cumulative_bbl: float = 0.0
     avg_pressure_psi: Optional[float] = None
     max_pressure_psi: Optional[float] = None
+    # earliest H-10 record within the search window — used to estimate injection duration
+    first_report_date: Optional[datetime] = None
     last_report_date: Optional[datetime] = None
     # ratio of mean monthly injection in last 3 months vs prior 9 months
     # >1.0 = ramp-up, <1.0 = ramp-down, None = insufficient data

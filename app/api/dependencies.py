@@ -21,6 +21,7 @@ from app.services.h10_service import H10Service
 from app.repositories.event_context_repository import EventContextRepository
 from app.services.event_context_service import EventContextService
 from app.services.attribution_service import HeuristicAttributionService
+from app.services.physics_attribution_service import PhysicsAttributionService
 
 
 def get_db() -> Generator[Session, None, None]:
@@ -106,8 +107,9 @@ def get_event_context_service(
     return EventContextService(seismic_repo, swd_repo, fracfocus_repo, iris_repo, settings)
 
 
-def get_attribution_service() -> HeuristicAttributionService:
-    return HeuristicAttributionService()
+def get_attribution_service() -> PhysicsAttributionService:
+    # To revert to the heuristic engine: return HeuristicAttributionService()
+    return PhysicsAttributionService()
 
 
 def get_sync_service(

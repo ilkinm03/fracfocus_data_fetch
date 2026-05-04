@@ -131,6 +131,9 @@ class EventContextService:
             cum_bbl = 0.0
             avg_psi: Optional[float] = None
             max_psi: Optional[float] = None
+            first_report: Optional[datetime] = None
+            last_report: Optional[datetime] = None
+            rate_ratio: Optional[float] = None
 
             if ev_date is not None:
                 window_start = ev_date - timedelta(days=window_days)
@@ -144,9 +147,10 @@ class EventContextService:
                 cum_bbl = sum(bbls)
                 avg_psi = sum(pressures_avg) / len(pressures_avg) if pressures_avg else None
                 max_psi = max(pressures_max) if pressures_max else None
-                # records are ordered by report_date asc; last entry is the most recent
-                last_report = records[-1].report_date if records else None
-                rate_ratio  = _rate_change_ratio(records)
+                # records ordered by report_date asc
+                first_report = records[0].report_date if records else None
+                last_report  = records[-1].report_date if records else None
+                rate_ratio   = _rate_change_ratio(records)
 
             result.append(
                 NearbySWDWell(
@@ -161,6 +165,7 @@ class EventContextService:
                     cumulative_bbl=cum_bbl,
                     avg_pressure_psi=avg_psi,
                     max_pressure_psi=max_psi,
+                    first_report_date=first_report,
                     last_report_date=last_report,
                     rate_change_ratio=rate_ratio,
                 )
