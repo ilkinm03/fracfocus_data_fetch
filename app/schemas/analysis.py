@@ -20,6 +20,10 @@ class NearbySWDWell(BaseModel):
     cumulative_bbl: float = 0.0
     avg_pressure_psi: Optional[float] = None
     max_pressure_psi: Optional[float] = None
+    last_report_date: Optional[datetime] = None
+    # ratio of mean monthly injection in last 3 months vs prior 9 months
+    # >1.0 = ramp-up, <1.0 = ramp-down, None = insufficient data
+    rate_change_ratio: Optional[float] = None
 
 
 class NearbyFracJob(BaseModel):
@@ -56,7 +60,7 @@ class AttributionSignal(BaseModel):
 class AttributionResult(BaseModel):
     engine: str
     likely_driver: str           # "swd" | "frac" | "indeterminate"
-    confidence: float            # 0.0 – 1.0
+    confidence: float            # P(driver is correct): 0.5 = coin-flip, 1.0 = fully one-sided; 0.0 = no evidence
     swd_score: float
     frac_score: float
     signals: list[AttributionSignal]

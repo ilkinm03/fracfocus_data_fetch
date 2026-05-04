@@ -22,6 +22,25 @@ log = logging.getLogger(__name__)
 _DEG_PER_KM = 1.0 / 111.0
 
 
+def _rate_change_ratio(records: list) -> Optional[float]:
+    """Mean monthly injection in the last 3 records vs the prior 9 records.
+
+    Returns None when there are fewer than 4 records (can't split meaningfully),
+    when either window has no non-null volumes, or when the prior average is zero
+    (undefined ratio — avoids a spurious infinite boost for newly started wells).
+    """
+    if len(records) < 4:
+        return None
+    recent = [r.vol_liq for r in records[-3:] if r.vol_liq is not None]
+    prior  = [r.vol_liq for r in records[-12:-3] if r.vol_liq is not None]
+    if not recent or not prior:
+        return None
+    prior_avg = sum(prior) / len(prior)
+    if prior_avg == 0.0:
+        return None
+    return (sum(recent) / len(recent)) / prior_avg
+
+
 def _bbox(lat: float, lon: float, radius_km: float) -> tuple[float, float, float, float]:
     pad = radius_km * _DEG_PER_KM
     return lat - pad, lat + pad, lon - pad, lon + pad
@@ -125,6 +144,9 @@ class EventContextService:
                 cum_bbl = sum(bbls)
                 avg_psi = sum(pressures_avg) / len(pressures_avg) if pressures_avg else None
                 max_psi = max(pressures_max) if pressures_max else None
+                # records are ordered by report_date asc; last entry is the most recent
+                last_report = records[-1].report_date if records else None
+                rate_ratio  = _rate_change_ratio(records)
 
             result.append(
                 NearbySWDWell(
@@ -139,6 +161,8 @@ class EventContextService:
                     cumulative_bbl=cum_bbl,
                     avg_pressure_psi=avg_psi,
                     max_pressure_psi=max_psi,
+                    last_report_date=last_report,
+                    rate_change_ratio=rate_ratio,
                 )
             )
 

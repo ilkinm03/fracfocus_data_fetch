@@ -11,7 +11,8 @@
       "Bash(uv sync *)",
       "Bash(unzip -p Delaware_PoC_Data_Plan_Enhanced.docx word/document.xml)",
       "Bash(python3)",
-      "Read(//c/c/Users/nihad/Desktop/fracfocus_data_fetch/documents/**)"
+      "Read(//c/c/Users/nihad/Desktop/fracfocus_data_fetch/documents/**)",
+      "Bash(python3 *)"
     ]
   }
 }

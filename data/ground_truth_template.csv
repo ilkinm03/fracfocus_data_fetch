@@ -1,0 +1,16 @@
+event_id,driver,notes
+# Replace event_id values with real IDs from your seismic_events table.
+# driver must be exactly "swd", "frac", or "indeterminate".
+# Rows with "indeterminate" are skipped by the calibration script (no definite ground truth).
+# The "notes" column is ignored by the script — use it for source citations.
+#
+# Good sources for ground truth labels in the Delaware Basin:
+#   - Frohlich et al. (2016) — Induced seismicity in Texas attributed to SWD
+#   - RRC enforcement actions (https://www.rrc.texas.gov/oil-gas/compliance-enforcement/)
+#   - TexNet event reports with operator-confirmed causes
+#   - Published case studies from UT Bureau of Economic Geology
+#
+tx2025example1,swd,Frohlich 2016 Table 2
+tx2025example2,frac,RRC enforcement letter 2024-03
+us7000example3,swd,UT BEG case study
+us7000example4,indeterminate,ambiguous — excluded from calibration
