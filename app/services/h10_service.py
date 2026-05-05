@@ -6,7 +6,14 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from app.core.config import Settings
 
-_RETRY = Retry(total=5, backoff_factor=2, status_forcelist=[500, 502, 503, 504])
+_RETRY = Retry(
+    total=8,
+    connect=5,          # DNS / bağlantı hatası için ayrı bütçe
+    read=3,
+    backoff_factor=3,   # 3, 6, 12, 24, 48 sn — geçici DNS sorunlarının geçmesi için
+    status_forcelist=[500, 502, 503, 504],
+    raise_on_status=False,
+)
 
 
 def _session() -> requests.Session:

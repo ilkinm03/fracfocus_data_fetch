@@ -9,7 +9,14 @@ from app.core.config import Settings
 log = logging.getLogger(__name__)
 
 _PAGE_SIZE = 5000
-_RETRY = Retry(total=5, backoff_factor=2, status_forcelist=[500, 502, 503, 504])
+_RETRY = Retry(
+    total=8,
+    connect=5,
+    read=3,
+    backoff_factor=3,
+    status_forcelist=[500, 502, 503, 504],
+    raise_on_status=False,
+)
 
 
 def _session() -> requests.Session:

@@ -1,8 +1,7 @@
 from pathlib import Path
 from typing import Generator
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker, Session, declarative_base
-from sqlalchemy.pool import StaticPool
 from app.core.config import get_settings
 
 settings = get_settings()
@@ -14,8 +13,14 @@ Path(_db_path).parent.mkdir(parents=True, exist_ok=True)
 engine = create_engine(
     settings.DATABASE_URL,
     connect_args={"check_same_thread": False},
-    poolclass=StaticPool,
 )
+
+
+@event.listens_for(engine, "connect")
+def _set_wal_mode(dbapi_connection, _record):
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.close()
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()

@@ -1,5 +1,6 @@
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime
 from typing import AsyncGenerator
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -49,9 +50,34 @@ def _run_scheduled_sync() -> None:
         db.close()
 
 
+def _reset_stale_running_jobs() -> None:
+    """Sunucu kapanırken yarıda kalan 'running' job'ları 'interrupted' olarak işaretle.
+
+    Checkpoint'ler silinmez — bir sonraki manuel fetch kaldığı yerden devam eder.
+    """
+    from app.models.sync_history import SyncHistory
+
+    db = SessionLocal()
+    try:
+        stale = db.query(SyncHistory).filter(SyncHistory.status == "running").all()
+        if stale:
+            now = datetime.utcnow()
+            for row in stale:
+                row.status = "interrupted"
+                row.finished_at = now
+                row.detail = "Server restarted while job was in progress — checkpoint preserved, re-trigger to resume"
+            db.commit()
+            log.info(f"Startup: marked {len(stale)} stale 'running' job(s) as 'interrupted'")
+    except Exception:
+        log.exception("Startup: failed to reset stale running jobs")
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     init_db()
+    _reset_stale_running_jobs()
 
     settings = get_settings()
     if settings.SYNC_ENABLED:
