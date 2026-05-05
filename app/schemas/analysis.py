@@ -59,6 +59,18 @@ class AttributionSignal(BaseModel):
     description: str
 
 
+class FracPriorParams(BaseModel):
+    """Parameters of the Monte Carlo frac prior, either fitted from FracFocus data or
+    falling back to published Delaware Basin literature defaults."""
+    source: str               # "data_driven" | "basin_defaults"
+    sample_size: int          # number of FracFocus rows used to fit the distribution
+    n_jobs_mean: float        # Poisson λ for synthetic job count within search area
+    water_vol_log_mean: float # location of log-normal distribution (ln bbl)
+    water_vol_log_std: float  # scale  of log-normal distribution
+    depth_mean_ft: float      # mean TVD (feet) for synthetic jobs
+    depth_std_ft: float       # std  TVD (feet)
+
+
 class AttributionResult(BaseModel):
     engine: str
     likely_driver: str           # "swd" | "frac" | "indeterminate"
@@ -66,6 +78,14 @@ class AttributionResult(BaseModel):
     swd_score: float
     frac_score: float
     signals: list[AttributionSignal]
+    # --- Monte Carlo frac uncertainty fields (populated only when frac data is absent) ---
+    frac_data_quality: str = "observed"       # "observed" | "absent"
+    mc_frac_score_mean: Optional[float] = None
+    mc_frac_score_p5:   Optional[float] = None
+    mc_frac_score_p95:  Optional[float] = None
+    # adjusted_* uses mc_frac_score_mean in the verdict instead of the observed zero
+    adjusted_likely_driver: Optional[str]   = None
+    adjusted_confidence:    Optional[float] = None
 
 
 class EventContextOut(BaseModel):
@@ -85,6 +105,8 @@ class EventContextOut(BaseModel):
     nearby_swd_wells: list[NearbySWDWell]
     nearby_frac_jobs: list[NearbyFracJob]
     nearby_stations: list[NearbyStation]
+    # MC prior params set only when nearby_frac_jobs is empty
+    frac_prior_params: Optional[FracPriorParams] = None
 
 
 class EventAnalysisOut(BaseModel):

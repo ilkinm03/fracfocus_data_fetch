@@ -9,7 +9,7 @@ from app.api.dependencies import (
 )
 from app.repositories.event_context_repository import EventContextRepository
 from app.services.event_context_service import EventContextService
-from app.services.attribution_service import HeuristicAttributionService
+from app.services.physics_attribution_service import PhysicsAttributionService
 from app.schemas.analysis import EventContextOut, EventAnalysisOut
 
 log = logging.getLogger(__name__)
@@ -68,7 +68,7 @@ def analyze_event(
     station_radius_km: float = Query(None, ge=0, le=500),
     svc: EventContextService = Depends(get_event_context_service),
     ctx_repo: EventContextRepository = Depends(get_event_context_repo),
-    attribution_svc: HeuristicAttributionService = Depends(get_attribution_service),
+    attribution_svc: PhysicsAttributionService = Depends(get_attribution_service),
 ) -> EventAnalysisOut:
     ctx = svc.assemble(
         event_id=event_id,
@@ -100,6 +100,12 @@ def analyze_event(
         nearby_swd_count=len(ctx.nearby_swd_wells),
         nearby_frac_count=len(ctx.nearby_frac_jobs),
         nearby_station_count=len(ctx.nearby_stations),
+        frac_data_quality=result.frac_data_quality,
+        mc_frac_score_mean=result.mc_frac_score_mean,
+        mc_frac_score_p5=result.mc_frac_score_p5,
+        mc_frac_score_p95=result.mc_frac_score_p95,
+        adjusted_likely_driver=result.adjusted_likely_driver,
+        adjusted_confidence=result.adjusted_confidence,
     )
 
     return EventAnalysisOut(

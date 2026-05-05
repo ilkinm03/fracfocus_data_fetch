@@ -42,6 +42,7 @@ from app.services.attribution_service import (
     _GAL_PER_BBL,
     _FT_TO_KM,
 )
+from app.services.mc_frac_prior import MonteCarloFracSampler
 
 log = logging.getLogger(__name__)
 
@@ -96,11 +97,14 @@ class PhysicsAttributionService:
         frac_lambda_km: float = _FRAC_LAMBDA_KM,
         depth_sigma_km: float = _DEPTH_SIGMA_KM,
         rate_boost_cap: float = _RATE_BOOST_CAP,
+        mc_n_trials: int = 1000,
     ) -> None:
         self.d_swd_m2_s = d_swd_m2_s
         self.frac_lambda_km = frac_lambda_km
         self.depth_sigma_km = depth_sigma_km
         self.rate_boost_cap = rate_boost_cap
+        self._mc_sampler = MonteCarloFracSampler()
+        self._mc_n_trials = mc_n_trials
 
     # ------------------------------------------------------------------
     # Public interface (same contract as HeuristicAttributionService)
@@ -110,7 +114,22 @@ class PhysicsAttributionService:
         swd_score = self._swd_score(context)
         frac_score = self._frac_score(context)
 
+        frac_data_quality = "observed" if context.nearby_frac_jobs else "absent"
         driver, confidence = HeuristicAttributionService._verdict(swd_score, frac_score)
+
+        # Monte Carlo uncertainty layer — runs only when frac data is absent
+        mc_mean = mc_p5 = mc_p95 = None
+        adj_driver = adj_conf = None
+        if context.frac_prior_params is not None:
+            mc_mean, mc_p5, mc_p95 = self._mc_sampler.sample(
+                context.frac_prior_params,
+                event_depth_km=context.event_depth_km,
+                frac_radius_km=context.frac_radius_km,
+                frac_lambda_km=self.frac_lambda_km,
+                depth_sigma_km=self.depth_sigma_km,
+                n_trials=self._mc_n_trials,
+            )
+            adj_driver, adj_conf = HeuristicAttributionService._verdict(swd_score, mc_mean)
 
         signals: list[AttributionSignal] = []
 
@@ -167,14 +186,42 @@ class PhysicsAttributionService:
                     )
                 )
 
+        # Add a synthetic MC signal when frac data is absent so it appears in the signal list
+        if mc_mean is not None and mc_mean > 0:
+            prior = context.frac_prior_params
+            signals.append(
+                AttributionSignal(
+                    name="FRAC [MC estimate]",
+                    value=round(mc_mean, 2),
+                    unit="weighted_bbl",
+                    description=(
+                        f"Monte Carlo frac estimate (N={self._mc_n_trials}): "
+                        f"mean={mc_mean:,.0f}, p5={mc_p5:,.0f}, p95={mc_p95:,.0f} — "
+                        f"prior source={prior.source}, "
+                        f"sample_size={prior.sample_size}, "
+                        f"n_jobs_mean={prior.n_jobs_mean:.2f}"
+                    ),
+                )
+            )
+
         signals.sort(key=lambda s: s.value, reverse=True)
 
-        log.info(
-            f"Attribution [{_ENGINE}] event={context.event_id}: "
-            f"driver={driver} confidence={confidence} "
-            f"swd_score={swd_score:.2f} frac_score={frac_score:.2f} "
-            f"D={self.d_swd_m2_s} m²/s"
-        )
+        if mc_mean is not None:
+            log.info(
+                f"Attribution [{_ENGINE}] event={context.event_id}: "
+                f"driver={driver} conf={confidence} | "
+                f"swd={swd_score:.2f} frac_obs={frac_score:.2f} mc_frac_mean={mc_mean:.2f} "
+                f"(p5={mc_p5:.2f} p95={mc_p95:.2f}) | "
+                f"adj_driver={adj_driver} adj_conf={adj_conf:.4f} | "
+                f"D={self.d_swd_m2_s} m²/s"
+            )
+        else:
+            log.info(
+                f"Attribution [{_ENGINE}] event={context.event_id}: "
+                f"driver={driver} conf={confidence} "
+                f"swd={swd_score:.2f} frac={frac_score:.2f} "
+                f"D={self.d_swd_m2_s} m²/s"
+            )
         return AttributionResult(
             engine=_ENGINE,
             likely_driver=driver,
@@ -182,6 +229,12 @@ class PhysicsAttributionService:
             swd_score=round(swd_score, 4),
             frac_score=round(frac_score, 4),
             signals=signals,
+            frac_data_quality=frac_data_quality,
+            mc_frac_score_mean=mc_mean,
+            mc_frac_score_p5=mc_p5,
+            mc_frac_score_p95=mc_p95,
+            adjusted_likely_driver=adj_driver,
+            adjusted_confidence=adj_conf,
         )
 
     # ------------------------------------------------------------------

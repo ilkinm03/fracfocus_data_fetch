@@ -28,6 +28,13 @@ class EventContextSnapshot(Base):
     nearby_swd_count = Column(Integer, nullable=False, default=0)
     nearby_frac_count = Column(Integer, nullable=False, default=0)
     nearby_station_count = Column(Integer, nullable=False, default=0)
+    # Monte Carlo frac uncertainty fields (null when frac jobs were observed)
+    frac_data_quality      = Column(Text,  nullable=True)
+    mc_frac_score_mean     = Column(Float, nullable=True)
+    mc_frac_score_p5       = Column(Float, nullable=True)
+    mc_frac_score_p95      = Column(Float, nullable=True)
+    adjusted_likely_driver = Column(Text,  nullable=True)
+    adjusted_confidence    = Column(Float, nullable=True)
 
     __table_args__ = (
         UniqueConstraint("event_id", "run_timestamp", name="uq_snapshot_event_run"),

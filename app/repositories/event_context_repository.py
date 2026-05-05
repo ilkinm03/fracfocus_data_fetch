@@ -24,6 +24,12 @@ class EventContextRepository:
         nearby_swd_count: int,
         nearby_frac_count: int,
         nearby_station_count: int,
+        frac_data_quality: Optional[str] = None,
+        mc_frac_score_mean: Optional[float] = None,
+        mc_frac_score_p5: Optional[float] = None,
+        mc_frac_score_p95: Optional[float] = None,
+        adjusted_likely_driver: Optional[str] = None,
+        adjusted_confidence: Optional[float] = None,
     ) -> EventContextSnapshot:
         snap = EventContextSnapshot(
             event_id=event_id,
@@ -40,6 +46,12 @@ class EventContextRepository:
             nearby_swd_count=nearby_swd_count,
             nearby_frac_count=nearby_frac_count,
             nearby_station_count=nearby_station_count,
+            frac_data_quality=frac_data_quality,
+            mc_frac_score_mean=mc_frac_score_mean,
+            mc_frac_score_p5=mc_frac_score_p5,
+            mc_frac_score_p95=mc_frac_score_p95,
+            adjusted_likely_driver=adjusted_likely_driver,
+            adjusted_confidence=adjusted_confidence,
         )
         self.db.add(snap)
         self.db.commit()

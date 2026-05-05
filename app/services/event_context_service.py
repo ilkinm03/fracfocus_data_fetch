@@ -10,10 +10,12 @@ from app.repositories.fracfocus_repository import FracFocusRepository
 from app.repositories.iris_repository import IRISStationRepository
 from app.schemas.analysis import (
     EventContextOut,
+    FracPriorParams,
     NearbySWDWell,
     NearbyFracJob,
     NearbyStation,
 )
+from app.services.mc_frac_prior import build_prior_from_jobs
 from app.utils.geo import haversine_km
 
 log = logging.getLogger(__name__)
@@ -89,6 +91,13 @@ class EventContextService:
         nearby_frac = self._nearby_frac(ev_lat, ev_lon, ev_date, frac_r, frac_w)
         nearby_stations = self._nearby_stations(ev_lat, ev_lon, sta_r)
 
+        frac_prior: Optional[FracPriorParams] = None
+        if not nearby_frac:
+            frac_prior = self._build_frac_prior(
+                ev_lat, ev_lon, ev_date, frac_r, frac_w,
+                inner_job_count=len(nearby_frac),
+            )
+
         return EventContextOut(
             event_id=event_id,
             event_latitude=event.latitude,
@@ -104,6 +113,7 @@ class EventContextService:
             nearby_swd_wells=nearby_swd,
             nearby_frac_jobs=nearby_frac,
             nearby_stations=nearby_stations,
+            frac_prior_params=frac_prior,
         )
 
     # ------------------------------------------------------------------ SWD
@@ -244,6 +254,42 @@ class EventContextService:
         result.sort(key=lambda j: j.distance_km)
         log.debug(f"Frac nearby: {len(result)} jobs within {radius_km} km of event")
         return result
+
+    def _build_frac_prior(
+        self,
+        ev_lat: float,
+        ev_lon: float,
+        ev_date: Optional[datetime],
+        search_radius_km: float,
+        window_days: int,
+        inner_job_count: int = 0,
+    ) -> FracPriorParams:
+        """Query FracFocus in a 5× wider radius to fit a data-driven MC prior.
+        Falls back to Delaware Basin literature defaults when the broader query is sparse.
+        inner_job_count is passed through so build_prior_from_jobs can apply a coverage
+        discount when the broader area is well-sampled and the inner area is genuinely empty.
+        """
+        broader_radius_km = search_radius_km * 5.0
+        min_lat, max_lat, min_lon, max_lon = _bbox(ev_lat, ev_lon, broader_radius_km)
+
+        rows: list[dict] = []
+        if ev_date is not None:
+            window_start = ev_date - timedelta(days=window_days)
+            try:
+                rows = self.fracfocus_repo.find_nearby(
+                    min_lat, max_lat, min_lon, max_lon,
+                    start_date=window_start.date(),
+                    end_date=ev_date.date(),
+                )
+            except Exception:
+                log.debug("FracFocus broader query failed; using basin defaults for MC prior")
+
+        prior = build_prior_from_jobs(rows, search_radius_km, broader_radius_km, inner_job_count)
+        log.debug(
+            f"Frac MC prior: source={prior.source} sample_size={prior.sample_size} "
+            f"n_jobs_mean={prior.n_jobs_mean:.2f}"
+        )
+        return prior
 
     # --------------------------------------------------------------- Stations
 

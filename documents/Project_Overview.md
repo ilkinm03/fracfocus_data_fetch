@@ -159,7 +159,37 @@ else:              driver = "indeterminate",  confidence = 0.5   # exact tie, no
 
 `p_swd` is the softmax of the two scores — mathematically equivalent to `sigmoid(log-odds)`. Confidence is directly interpretable as the probability that the identified driver is correct: **0.5 means a coin-flip, 1.0 means the evidence is entirely one-sided**. It can never fall below 0.5 when a driver is named (a score that low would flip the driver label instead). The only time confidence is 0.0 is when there is no evidence at all — no nearby wells and no nearby frac jobs within the search windows.
 
-**Signals:** Along with the overall verdict, the system produces a ranked list of contributing sites — each well or frac job that influenced the score, listed from most to least influential. This lets investigators immediately see which specific operations warrant closer scrutiny.
+**Signals:** Along with the overall verdict, the system produces a ranked list of contributing sites — each well or frac job that influenced the score, listed from most to least influential. When frac data is absent, the Monte Carlo estimate (described below) appears in the signal list as `"FRAC [MC estimate]"` with its mean, p5, and p95 values.
+
+**Monte Carlo frac uncertainty (when `nearby_frac_jobs` is empty):**
+
+FracFocus has structural underreporting — not every operator files disclosures, especially smaller independents. When the search returns zero frac jobs, setting `frac_score = 0` is epistemically incorrect: it produces `confidence = 1.0` for SWD regardless of the SWD evidence, which overstates certainty.
+
+To correct this, when no observed frac jobs are found the system:
+
+1. **Builds a prior** by querying FracFocus in a 5× wider radius to fit log-normal water-volume and normal depth distributions to actual Delaware Basin completions. Falls back to published defaults (Wolfcamp/Bone Spring median ≈ 12.5 M gal/job, TVD ≈ 7,500 ft) when the broader query is also sparse.
+
+2. **Runs 1,000 Monte Carlo trials**, each sampling:
+   - Number of hypothetical jobs from Poisson(λ), where λ is scaled from the broader-area count to the search area
+   - Distance from the event: area-weighted uniform on a disk (`r = R × √U`)
+   - Water volume: log-normal from the fitted prior
+   - TVD depth: normal from the fitted prior
+   
+3. **Computes frac_score per trial** using the same spatial-decay + depth-penalty formula as observed jobs.
+
+4. **Reports `(mean, p5, p95)`** of the resulting distribution as new fields on `AttributionResult` — alongside an MC-adjusted verdict that uses `mc_frac_score_mean` instead of zero in the softmax.
+
+The primary `likely_driver` and `confidence` fields are **not changed** — they continue to reflect the observed data. The `adjusted_likely_driver` and `adjusted_confidence` fields represent the MC-corrected interpretation:
+
+```
+# Example: strong SWD evidence, no observed frac data
+likely_driver:          "swd"    confidence: 1.0    ← raw observed-data verdict (was misleading)
+adjusted_likely_driver: "swd"    adjusted_confidence: 0.76   ← honest: MC frac is non-zero
+frac_data_quality:      "absent"
+mc_frac_score_mean:  55000   mc_frac_score_p5: 0   mc_frac_score_p95: 190000
+```
+
+When frac jobs *are* observed, `frac_data_quality = "observed"` and all `mc_*` and `adjusted_*` fields are `null`.
 
 ### Step 3 — Persist the Snapshot
 
@@ -169,6 +199,7 @@ Every analysis run is saved to the `event_context_snapshot` table. A snapshot re
 - Which search parameters were used (radii, time windows)
 - The attribution verdict and confidence
 - The count of nearby SWD wells, frac jobs, and stations found
+- MC frac uncertainty fields (`frac_data_quality`, `mc_frac_score_mean/p5/p95`, `adjusted_likely_driver`, `adjusted_confidence`) when frac data is absent
 
 Snapshots are never overwritten — each analysis run adds a new row. This means you can re-run an analysis with different parameters and compare results side by side.
 
@@ -219,44 +250,87 @@ Both endpoints accept optional query parameters to override the default search r
 - `frac_radius_km`, `frac_window_days`
 - `station_radius_km`
 
-### Sample Attribution Response
+### Sample Attribution Response — frac data observed
 
 ```json
 {
   "snapshot_id": 42,
   "context": {
     "event_id": "tx2025iqwk",
-    "magnitude": 3.2,
-    "latitude": 31.847,
-    "longitude": -103.921,
-    "depth_km": 4.5,
+    "event_magnitude": 3.2,
+    "event_latitude": 31.847,
+    "event_longitude": -103.921,
+    "event_depth_km": 4.5,
     "event_date": "2025-06-15T14:23:00",
-    "nearby_swd_wells": [
-      {
-        "uic_number": "UIC-12345",
-        "distance_km": 4.2,
-        "cumulative_bbl": 1850000,
-        "avg_injection_pressure_psi": 1340,
-        "max_injection_pressure_psi": 2100,
-        "monthly_record_count": 84
-      }
-    ],
-    "nearby_frac_jobs": [...],
-    "nearby_stations": [...]
+    "nearby_swd_wells": [{ "uic_number": "UIC-12345", "distance_km": 4.2, "cumulative_bbl": 1850000 }],
+    "nearby_frac_jobs": [{ "api_number": "42-123-45678", "distance_km": 2.1, "total_water_volume": 14000000 }],
+    "nearby_stations": [...],
+    "frac_prior_params": null
   },
   "attribution": {
-    "engine": "heuristic_v1",
+    "engine": "physics_v1",
     "likely_driver": "swd",
     "confidence": 0.8734,
     "swd_score": 142300.5,
     "frac_score": 18040.2,
+    "frac_data_quality": "observed",
+    "mc_frac_score_mean": null,
+    "mc_frac_score_p5": null,
+    "mc_frac_score_p95": null,
+    "adjusted_likely_driver": null,
+    "adjusted_confidence": null,
     "signals": [
-      {
-        "name": "SWD UIC-12345",
-        "value": 98432.1,
-        "unit": "weighted_bbl",
-        "description": "UIC-12345 — 4.2 km away, 1,850,000 bbl cumulative in window, last report 12d before event"
-      }
+      { "name": "SWD UIC-12345", "value": 98432.1, "unit": "weighted_bbl",
+        "description": "UIC-12345 — 4.2 km away, 1,850,000 bbl cumul., pressure front ≈22.3 km, erfc=0.6120" },
+      { "name": "FRAC 42-123-45678", "value": 17984.3, "unit": "weighted_bbl",
+        "description": "Frac job at 2.1 km, started 2024-03-01, 14,000,000 gal (333,333 bbl) water volume" }
+    ]
+  }
+}
+```
+
+### Sample Attribution Response — frac data absent (MC activated)
+
+```json
+{
+  "snapshot_id": 43,
+  "context": {
+    "event_id": "tx2025abcd",
+    "event_magnitude": 2.8,
+    "event_latitude": 31.912,
+    "event_longitude": -104.103,
+    "event_depth_km": 5.2,
+    "event_date": "2025-08-20T09:11:00",
+    "nearby_swd_wells": [{ "uic_number": "UIC-67890", "distance_km": 6.8, "cumulative_bbl": 720000 }],
+    "nearby_frac_jobs": [],
+    "nearby_stations": [...],
+    "frac_prior_params": {
+      "source": "data_driven",
+      "sample_size": 134,
+      "n_jobs_mean": 2.1,
+      "water_vol_log_mean": 12.7,
+      "water_vol_log_std": 0.76,
+      "depth_mean_ft": 7820.0,
+      "depth_std_ft": 1340.0
+    }
+  },
+  "attribution": {
+    "engine": "physics_v1",
+    "likely_driver": "swd",
+    "confidence": 1.0,
+    "swd_score": 44100.0,
+    "frac_score": 0.0,
+    "frac_data_quality": "absent",
+    "mc_frac_score_mean": 41800.0,
+    "mc_frac_score_p5": 0.0,
+    "mc_frac_score_p95": 148200.0,
+    "adjusted_likely_driver": "swd",
+    "adjusted_confidence": 0.7134,
+    "signals": [
+      { "name": "SWD UIC-67890", "value": 44100.0, "unit": "weighted_bbl",
+        "description": "UIC-67890 — 6.8 km away, 720,000 bbl cumul., pressure front ≈18.1 km, erfc=0.4820" },
+      { "name": "FRAC [MC estimate]", "value": 41800.0, "unit": "weighted_bbl",
+        "description": "Monte Carlo frac estimate (N=1000): mean=41800, p5=0, p95=148200 — prior source=data_driven, sample_size=134, n_jobs_mean=2.10" }
     ]
   }
 }
@@ -284,7 +358,7 @@ Seismic monitoring station metadata: network code, station code, location, eleva
 Hydraulic fracturing disclosures. The schema is inferred from the CSV headers at ingest time — no fixed column list. Column names are normalized to lowercase-no-spaces. Key columns used in analysis: `latitude`, `longitude`, `jobstartdate`, `totalbasewatervolume`, `apinumber`, `operatorname`.
 
 ### `event_context_snapshot`
-Persisted analysis results. Every `POST /analyze` call appends a row — existing snapshots are never mutated. Stores the attribution verdict, confidence, signal JSON, search parameters used, and counts of nearby features found.
+Persisted analysis results. Every `POST /analyze` call appends a row — existing snapshots are never mutated. Stores the attribution verdict, confidence, signal JSON, search parameters used, counts of nearby features found, and six MC frac uncertainty columns: `frac_data_quality`, `mc_frac_score_mean`, `mc_frac_score_p5`, `mc_frac_score_p95`, `adjusted_likely_driver`, `adjusted_confidence`. The MC columns are `NULL` when frac data was observed.
 
 ### `swd_fetch_checkpoint`
 Internal checkpoint table for resumable SWD fetches. Stores the current page offset and running insert/update counts per source. If a fetch is interrupted, it reads this table and continues from where it stopped.
@@ -326,8 +400,10 @@ app/
 │   ├── uic_service.py           ← Socrata UIC client
 │   ├── h10_service.py           ← Socrata H-10 client
 │   ├── fracfocus_sync_service.py← ZIP download + CSV ingestion
-│   ├── event_context_service.py ← Context assembly
-│   └── attribution_service.py   ← Heuristic attribution engine
+│   ├── event_context_service.py ← Context assembly (builds MC prior when frac absent)
+│   ├── attribution_service.py   ← Heuristic attribution engine
+│   ├── physics_attribution_service.py ← Physics engine with MC uncertainty layer
+│   └── mc_frac_prior.py         ← Monte Carlo frac prior: fitting + sampling
 └── schemas/
     ├── seismic.py               ← Pydantic response models for seismic endpoints
     ├── swd.py                   ← Pydantic response models for SWD endpoints
@@ -456,6 +532,20 @@ The key insight: **a well 15 km away that has only been injecting for 1 year sco
 
 **What changed in practice:** a well 15 km away with 1 year of injection history now scores ~17× lower than it did under `heuristic_v4`. Wells with long injection histories near the earthquake score meaningfully higher. Time and distance interact — neither alone determines the score.
 
+**Monte Carlo frac uncertainty layer** (added to `physics_v1`):
+
+When `nearby_frac_jobs` is empty, the engine no longer treats `frac_score = 0` as settled fact. FracFocus does not have 100% operator compliance, so an empty result may reflect reporting gaps rather than genuine absence of frac activity. The engine:
+
+1. Reads `EventContextOut.frac_prior_params` — a `FracPriorParams` object assembled by `EventContextService` from a 5× wider FracFocus query (data-driven prior) or Delaware Basin literature defaults (fallback).
+2. Runs 1,000 Monte Carlo trials sampling synthetic frac jobs from the prior and scoring them with the same formula as observed jobs.
+3. Returns `(mc_frac_score_mean, mc_frac_score_p5, mc_frac_score_p95)` as new fields on `AttributionResult`, plus `adjusted_likely_driver` and `adjusted_confidence` computed using the MC mean in the softmax verdict.
+
+The prior uses:
+- **Delaware Basin defaults** (fallback): n_jobs_mean = 2.0, water volume log-normal median ≈ 298k bbl (≈ 12.5M gal), TVD normal mean 7,500 ft ± 1,500 ft
+- **Data-driven** (when ≥ 10 FracFocus rows in the 5× radius): log-normal fitted to actual water volumes, normal fitted to actual TVDs, Poisson rate scaled by area ratio
+
+**What changed in practice:** an event with only SWD evidence used to produce `likely_driver = "swd", confidence = 1.0` regardless of how weak the SWD signal was. Now the same event might produce `adjusted_likely_driver = "swd", adjusted_confidence = 0.71` — communicating that 29% of the expected total signal (SWD + possible frac) is attributable to unobserved frac activity.
+
 ---
 
 ### Factors at a glance
@@ -469,12 +559,14 @@ The key insight: **a well 15 km away that has only been injecting for 1 year sco
 | Log-odds confidence metric | — | — | — | ✓ | ✓ | ✓ |
 | Rate-change boost (cap ×3) | — | — | — | — | ✓ | ✓ |
 | Spatial decay frac `exp(−r/λ)` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| MC frac uncertainty (when frac absent) | — | — | — | — | — | ✓ |
 
 ### Planned improvements (not yet implemented)
 
 - ~~**Injection rate change signal**~~ — implemented in `heuristic_v4`
 - ~~**Calibrated λ parameters**~~ — calibration infrastructure implemented (see below); apply after collecting ground truth labels
 - ~~**Pore-pressure diffusion model**~~ — implemented as `physics_v1` (see below)
+- ~~**Monte Carlo frac uncertainty**~~ — implemented in `physics_v1`; absent frac data is treated as uncertain rather than zero
 - **Coulomb stress transfer for frac** — model stress changes on nearby faults using focal mechanism data from the TexNet catalog
 
 ### Parameter calibration
@@ -570,7 +662,7 @@ The interactive API docs are available at `http://localhost:8000/docs` once the 
 - **SQLite**: The database is a single local file. This is appropriate for a proof-of-concept but would need to be replaced (PostgreSQL with PostGIS) for production-scale concurrent access.
 - **No spatial index**: Proximity queries use bounding-box filtering on raw lat/lon columns, then compute exact distances in Python. This is fast enough for the current data volume but would not scale to millions of rows.
 - **Attribution model**: The active engine `physics_v1` uses pore-pressure diffusion (`erfc`) for SWD and exponential spatial decay for frac. It assumes a single homogeneous diffusivity value — real formations are heterogeneous, anisotropic, and faulted. Results should be treated as informed estimates, not certified attributions.
-- **FracFocus coverage**: FracFocus disclosure is mandatory in Texas but not all operators comply immediately. Some jobs may be missing or delayed.
+- **FracFocus coverage**: FracFocus disclosure is mandatory in Texas but not all operators comply immediately. Some jobs may be missing or delayed. The Monte Carlo frac uncertainty layer addresses this by treating absent frac data as uncertain rather than as zero: when no frac jobs are found, the engine samples plausible frac contributions from a prior fitted to the broader Delaware Basin dataset and reports `adjusted_likely_driver` / `adjusted_confidence` that factor in this uncertainty. However, the MC prior is a statistical estimate — it cannot substitute for actual operator disclosures.
 - **TexNet coverage gap**: TexNet was deployed in 2017. Events before that date come from USGS, which has lower magnitude completeness in this region for the pre-TexNet era.
 - **No authentication**: The API has no authentication layer. It should not be exposed publicly without adding one.
 
