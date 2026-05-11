@@ -33,7 +33,7 @@ to a JSON file for further analysis.
 After a successful run
 ----------------------
   Heuristic: copy best-fit values into attribution_service.py module constants.
-  Physics:   update d_swd_m2_s default in physics_attribution_service.py.
+  Physics:   update d_swd_override default in physics_attribution_service.py.
   Then bump _ENGINE to the next version label in the relevant file.
 """
 
@@ -74,9 +74,10 @@ HEURISTIC_GRID: dict[str, list[float]] = {
 }
 
 # Physics engine grid  (6×5×5 = 150 combinations)
-# d_swd_m2_s spans the published range for Delaware Basin formations (0.01–5 m²/s).
-PHYSICS_GRID: dict[str, list[float]] = {
-    "d_swd_m2_s":     [0.05, 0.1, 0.2, 0.5, 1.0, 2.0],
+# d_swd_override spans the published range for Delaware Basin formations (0.01–5 m²/s).
+# Set to None in PHYSICS_DEFAULTS to use the per-well formation D lookup in production.
+PHYSICS_GRID: dict[str, list] = {
+    "d_swd_override": [0.05, 0.1, 0.2, 0.5, 1.0, 2.0],
     "frac_lambda_km": [1.0, 2.0, 3.0, 4.0, 5.0],
     "depth_sigma_km": [1.0, 2.0, 3.0, 4.0, 5.0],
 }
@@ -89,7 +90,7 @@ HEURISTIC_DEFAULTS = {
 }
 
 PHYSICS_DEFAULTS = {
-    "d_swd_m2_s": 0.5,
+    "d_swd_override": None,   # None = use per-well formation D lookup (production default)
     "frac_lambda_km": 3.0,
     "depth_sigma_km": 3.0,
 }

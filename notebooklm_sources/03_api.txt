@@ -1,0 +1,83 @@
+SEISMIC-BACK CODEBASE — API LAYER SYMBOL MAP
+Generated: 2026-05-08 | Path: app/api/
+Purpose: FastAPI route definitions and dependency injection wiring.
+
+=== app/api/dependencies.py ===
+Single source of truth for all FastAPI Depends() wiring.
+IMPORTANT: When adding a service dependency, update BOTH this file AND app/tasks/fracfocus_scheduler.py.
+
+FUNCTION: get_db() -> Generator[Session, None, None]  — yields SQLAlchemy session
+FUNCTION: get_settings() -> Settings  — lru_cached singleton
+FUNCTION: get_download_service(settings) -> DownloadService
+FUNCTION: get_fracfocus_repo() -> FracFocusRepository
+FUNCTION: get_csv_file_state_repo(db) -> CsvFileStateRepository
+FUNCTION: get_texnet_service(settings) -> TexNetService
+FUNCTION: get_usgs_service(settings) -> USGSService
+FUNCTION: get_iris_service(settings) -> IRISService
+FUNCTION: get_iris_repo(db) -> IRISStationRepository
+FUNCTION: get_seismic_repo(db) -> SeismicEventRepository
+FUNCTION: get_uic_service(settings) -> UICService
+FUNCTION: get_h10_service(settings) -> H10Service
+FUNCTION: get_swd_repo(db) -> SWDRepository
+FUNCTION: get_sync_history_repo(db) -> SyncHistoryRepository
+FUNCTION: get_event_context_repo(db) -> EventContextRepository
+FUNCTION: get_event_context_service(db, settings) -> EventContextService
+FUNCTION: get_attribution_service() -> PhysicsAttributionService
+  — Returns current production engine. Swap engine here without changing endpoints.
+FUNCTION: get_sync_service(db, settings, download_svc, fracfocus_repo, csv_file_state_repo) -> SyncService
+
+=== app/api/v1/endpoints/analysis.py ===
+Route prefix: /api/v1/analysis
+
+GET  /events/{event_id}/context
+  FUNCTION: get_event_context(event_id, swd_radius_km, swd_window_days, frac_radius_km, frac_window_days, station_radius_km, svc) -> EventContextOut
+  — Read-only. Assembles context but does NOT persist a snapshot.
+
+POST /events/{event_id}/analyze
+  FUNCTION: analyze_event(event_id, swd_radius_km, swd_window_days, frac_radius_km, frac_window_days, station_radius_km, svc, ctx_repo, attribution_svc) -> EventAnalysisOut
+  — Assembles context, runs attribution engine, persists snapshot to event_context_snapshot.
+
+=== app/api/v1/endpoints/fracfocus.py ===
+Route prefix: /api/v1/data
+
+GET  /data                       -> list_records(page, page_size, state, operator, repo)
+GET  /data/stats                 -> get_stats(repo)
+GET  /data/columns               -> list_columns(repo)  — all column names in fracfocus table
+GET  /data/distinct/{column}     -> distinct_values(column, repo)  — distinct non-empty values
+GET  /data/group/{column}        -> grouped_counts(column, repo)   — value + row count, sorted desc
+FUNCTION: _validate_column(column, repo) -> None  — SQL injection guard via PRAGMA table_info
+
+=== app/api/v1/endpoints/fracfocus_sync.py ===
+Route prefix: /api/v1/sync
+
+GET  /sync/status                -> get_sync_status(sync_svc)
+POST /sync/trigger               -> trigger_sync(background_tasks, sync_svc, history_repo)
+
+=== app/api/v1/endpoints/iris.py ===
+Route prefix: /api/v1/seismic/iris
+
+POST /seismic/iris/stations/fetch -> fetch_iris_stations(iris, repo)
+GET  /seismic/iris/stations       -> list_iris_stations(page, page_size, network, active_only, repo)
+
+=== app/api/v1/endpoints/seismic.py ===
+Route prefix: /api/v1/seismic
+
+POST /seismic/texnet/fetch       -> fetch_texnet(min_magnitude, texnet, repo, history_repo)
+  — Upserts into seismic_events with source="texnet"
+POST /seismic/usgs/fetch         -> fetch_usgs(min_magnitude, usgs, repo, history_repo)
+  — Upserts into seismic_events with source="usgs"
+GET  /seismic/events             -> list_events(page, page_size, source, county, min_magnitude, repo)
+
+=== app/api/v1/endpoints/swd.py ===
+Route prefix: /api/v1/swd
+
+POST /swd/uic/fetch              -> fetch_uic(uic_svc, repo, history_repo)
+  — Checkpoint-resumable; upserts into swd_wells
+POST /swd/h10/fetch              -> fetch_h10(h10_svc, repo, history_repo)
+  — Checkpoint-resumable; run after uic/fetch; upserts into swd_monthly_monitor
+GET  /swd/wells                  -> list_wells(page, page_size, repo)
+GET  /swd/monitoring             -> list_monitoring(page, page_size, uic_no, repo)
+
+=== app/api/v1/endpoints/sync_history.py ===
+GET  /sync-history               -> get_sync_history(source, status, limit, repo)
+  — Paginated run history across all pipelines

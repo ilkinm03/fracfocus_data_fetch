@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Optional
 from sqlalchemy.orm import Session
 from app.models.seismic_event import SeismicEvent
@@ -83,3 +83,34 @@ class SeismicEventRepository:
             .limit(page_size)
             .all()
         )
+
+    def find_nearby_events(
+        self,
+        lat: float,
+        lon: float,
+        radius_km: float,
+        event_date: Optional[datetime],
+        window_days: int = 365,
+        min_magnitude: float = 1.5,
+    ) -> list[SeismicEvent]:
+        """Return events within a bounding box and time window for sequence statistics.
+
+        Uses a bbox pre-filter (fast) then returns candidates sorted by event_date
+        ascending. The caller can apply an exact Haversine filter if sub-km precision
+        is required; for sequence statistics the bbox approximation is sufficient.
+        """
+        deg_per_km = 1.0 / 111.0
+        pad = radius_km * deg_per_km
+        q = (
+            self.db.query(SeismicEvent)
+            .filter(SeismicEvent.latitude  >= lat - pad)
+            .filter(SeismicEvent.latitude  <= lat + pad)
+            .filter(SeismicEvent.longitude >= lon - pad)
+            .filter(SeismicEvent.longitude <= lon + pad)
+        )
+        if event_date is not None:
+            q = q.filter(SeismicEvent.event_date >= event_date - timedelta(days=window_days))
+            q = q.filter(SeismicEvent.event_date <= event_date)
+        if min_magnitude is not None:
+            q = q.filter(SeismicEvent.magnitude >= min_magnitude)
+        return q.order_by(SeismicEvent.event_date.asc()).all()

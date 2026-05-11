@@ -12,7 +12,12 @@
       "Bash(unzip -p Delaware_PoC_Data_Plan_Enhanced.docx word/document.xml)",
       "Bash(python3)",
       "Read(//c/c/Users/nihad/Desktop/fracfocus_data_fetch/documents/**)",
-      "Bash(python3 *)"
+      "Bash(python3 *)",
+      "mcp__notebooklm__ask_question",
+      "mcp__notebooklm__add_source",
+      "mcp__notebooklm__close_session",
+      "mcp__notebooklm__select_notebook",
+      "mcp__notebooklm__setup_auth"
     ]
   }
 }

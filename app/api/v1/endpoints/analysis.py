@@ -53,9 +53,11 @@ def get_event_context(
     response_model=EventAnalysisOut,
     summary="Run attribution analysis and persist snapshot",
     description=(
-        "Assembles event context, runs the heuristic attribution engine (placeholder for "
-        "the Permian physics engine), persists an event_context_snapshot row, and returns "
-        "the full result. Each call appends a new snapshot row — prior runs are preserved. "
+        "Assembles event context, runs the physics attribution engine (physics_v2: "
+        "Theis erfc diffusion + formation-specific D + Coulomb failure boost + Monte Carlo "
+        "frac uncertainty), persists an event_context_snapshot row, and returns the full "
+        "result including ETAS sequence statistics for nearby events. "
+        "Each call appends a new snapshot row — prior runs are preserved. "
         "Returns 404 if event_id is unknown."
     ),
 )
@@ -108,8 +110,17 @@ def analyze_event(
         adjusted_confidence=result.adjusted_confidence,
     )
 
+    seq_stats = None
+    if ctx.event_latitude is not None and ctx.event_longitude is not None:
+        seq_stats = svc.compute_sequence_stats(
+            ev_lat=ctx.event_latitude,
+            ev_lon=ctx.event_longitude,
+            ev_date=ctx.event_date,
+        )
+
     return EventAnalysisOut(
         snapshot_id=snap.id,
         context=ctx,
         attribution=result,
+        sequence_stats=seq_stats,
     )

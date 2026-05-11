@@ -1,0 +1,87 @@
+SEISMIC-BACK CODEBASE — REPOSITORIES LAYER SYMBOL MAP
+Generated: 2026-05-08 | Path: app/repositories/
+Purpose: Data access layer — all SQLAlchemy ORM and Core queries against fracfocus.db.
+
+CLASS: EventContextRepository [event_context_repository.py:7]
+  METHOD: save_snapshot(event_id, run_timestamp, swd_radius_km, swd_window_days, frac_radius_km,
+    frac_window_days, station_radius_km, engine, likely_driver, confidence, signals_json,
+    nearby_swd_count, nearby_frac_count, nearby_station_count, frac_data_quality,
+    mc_frac_score_mean, mc_frac_score_p5, mc_frac_score_p95,
+    adjusted_likely_driver, adjusted_confidence) -> EventContextSnapshot [line 11]
+    — Append-only audit log; existing snapshots are never mutated.
+  METHOD: get_latest(event_id) -> Optional[EventContextSnapshot] [line 61]
+  METHOD: list_for_event(event_id) -> list[EventContextSnapshot] [line 69]
+  Table: event_context_snapshot
+
+CLASS: FracFocusRepository [fracfocus_repository.py:14]
+  Note: Uses SQLAlchemy Core (not ORM). Schema inferred dynamically from CSV headers.
+  METHOD: table_exists() -> bool [line 18]
+  METHOD: create_table_if_not_exists(columns) -> None [line 21]
+  METHOD: ensure_columns(columns) -> None [line 32]  — ALTER TABLE ADD COLUMN for missing columns
+  METHOD: get_table_columns() -> list[str] [line 47]
+  METHOD: get_distinct_values(column) -> list[str] [line 53]
+  METHOD: get_grouped_counts(column) -> list[dict] [line 65]
+  METHOD: count() -> int [line 78]
+  METHOD: get_paginated(page, page_size, state, operator) -> tuple[int, list[dict]] [line 84]
+  METHOD: find_nearby(min_lat, max_lat, min_lon, max_lon, start_date, end_date) -> list[dict] [line 125]
+    — Frac jobs within bbox and date window. Column names are hardcoded (no injection surface).
+    — Safely returns [] when columns are absent.
+  METHOD: replace_csv_data(csv_path, columns, batch_size) -> int [line 225]
+    — Atomic: DELETE WHERE source_file=X + bulk INSERT in one transaction.
+  Table: fracfocus (dynamic schema)
+
+CLASS: SyncStateRepository [fracfocus_sync_state_repository.py:12]
+  METHOD: get_by_url(url) -> Optional[SyncState]
+  METHOD: upsert(url, etag, last_modified) -> SyncState
+  METHOD: set_status(url, status, error, sync_time) -> None
+  Table: sync_state
+
+CLASS: CsvFileStateRepository [fracfocus_sync_state_repository.py:49]
+  METHOD: get_changed_files(zip_infos) -> list[ZipInfo]
+    — Returns entries whose size or date differs from DB. New files always included.
+  METHOD: upsert_after_processing(info, row_count) -> None
+  Table: csv_file_state
+
+CLASS: IRISStationRepository [iris_repository.py:7]
+  METHOD: upsert_many(rows) -> tuple[int, int]  — keyed on network_station; returns (inserted, updated)
+  METHOD: find_stations_in_bbox(min_lat, max_lat, min_lon, max_lon) -> list[IRISStation]
+    — Caller haversine-filters the result
+  METHOD: count(network, active_only) -> int
+  METHOD: get_paginated(page, page_size, network, active_only) -> list[IRISStation]
+  Table: iris_stations
+
+CLASS: SeismicEventRepository [seismic_repository.py:7]
+  METHOD: upsert_many(rows) -> tuple[int, int]  — keyed on event_id; row-by-row for small catalog
+  METHOD: count(source, county, min_magnitude) -> int
+  METHOD: get_by_event_id(event_id) -> Optional[SeismicEvent]
+  METHOD: get_paginated(page, page_size, source, county, min_magnitude) -> list[SeismicEvent]
+  Table: seismic_events (shared by TexNet + USGS, distinguished by source column)
+    TexNet-specific: phase_count, region_name, county_name, station_count
+    USGS-specific: place, title, alternate_ids (cross-catalog IDs), gap
+    evaluation_status: TexNet uses "final"/"preliminary"; USGS uses "reviewed"/"automatic" — separate namespaces
+
+CLASS: SWDRepository [swd_repository.py:22]
+  METHOD: upsert_wells(rows) -> tuple[int, int]
+  METHOD: get_all_uic_numbers() -> list[str]
+  METHOD: count_wells() -> int
+  METHOD: find_wells_in_bbox(min_lat, max_lat, min_lon, max_lon) -> list[SWDWell]
+    — Caller applies haversine filtering on returned list
+  METHOD: get_monitoring_window(uic_no, start, end) -> list[SWDMonthlyMonitor]
+    — H-10 monthly records for one well in [start, end]
+  METHOD: get_wells_paginated(page, page_size) -> list[SWDWell]
+  METHOD: upsert_monitoring(rows) -> tuple[int, int]
+  METHOD: count_monitoring(uic_no) -> int
+  METHOD: get_monitoring_paginated(page, page_size, uic_no) -> list[SWDMonthlyMonitor]
+  METHOD: get_checkpoint(source) -> Optional[SWDFetchCheckpoint]
+  METHOD: save_checkpoint(source, progress_value, total_count, inserted_so_far, updated_so_far, secondary_value) -> SWDFetchCheckpoint
+  METHOD: clear_checkpoint(source) -> None
+  Tables: swd_wells, swd_monthly_monitor, swd_fetch_checkpoint
+
+CLASS: SyncHistoryRepository [sync_history_repository.py:10]
+  METHOD: create(source, status) -> SyncHistory
+  METHOD: mark_running(history_id) -> None
+  METHOD: finish(history_id, status, rows_inserted, rows_updated, detail) -> None
+  METHOD: get_all(source, status, limit) -> list[SyncHistory]
+  METHOD: count(source, status) -> int
+  Table: sync_history
+  Status lifecycle: pending -> running -> success / failed / skipped / interrupted

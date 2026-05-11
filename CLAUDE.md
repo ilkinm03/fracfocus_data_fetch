@@ -210,15 +210,28 @@ POST /api/v1/analysis/events/{event_id}/analyze
   └── (POST only) EventContextRepository.save_snapshot() → event_context_snapshot table
 ```
 
-### Heuristic attribution engine seam
+### Active attribution engine
 
-`HeuristicAttributionService` (`app/services/attribution_service.py`) is a placeholder for Travis Walla's Permian physics engine. It uses distance-weighted injection volume / water volume with exponential decay:
+**`PhysicsAttributionService`** (`app/services/physics_attribution_service.py`, engine label `"physics_v2"`) is wired in `app/api/dependencies.py::get_attribution_service()`.
 
-- SWD score = Σ(cumulative_bbl × exp(−distance_km / 10))
-- Frac score = Σ(water_vol × exp(−distance_km / 3))
-- Engine label: `"heuristic_v0"`
+**physics_v2 scoring formula:**
 
-To swap in the real engine: register a `PhysicsAttributionService` with the same `score(context: EventContextOut) -> AttributionResult` interface in `app/services/` and update the `get_attribution_service` factory in `app/api/dependencies.py`. No endpoint or schema changes needed.
+- SWD: `Σ bbl × erfc(r / 2√(D_i·t)) × depth_penalty × rate_boost × (1 + CFF_boost)`
+  - `D_i` per well from Delaware Basin formation table (`app/utils/formation_lookup.py`)
+  - CFF boost from H-10 average injection pressure via `app/services/coulomb_service.py`
+- Frac: `Σ (gal/42) × exp(−r/λ_frac) × depth_penalty`
+  - TVD falls back to alternate FracFocus columns then Delaware Basin default (7 500 ft)
+- MC: when frac data absent → `MonteCarloFracSampler` (numpy-vectorised, 2 000 trials)
+
+**Additional analysis modules:**
+
+- `app/services/sequence_stats.py` — b-value MLE, Omori p-value, CUSUM rate-shift, ETAS declustering (Ogata 1988). Called by `POST /analyze` to classify nearby events.
+- `app/utils/formation_lookup.py` — maps injection zone TVD to hydraulic diffusivity D (14 Delaware Basin formations)
+- `app/services/coulomb_service.py` — CFF calculation using H-10 pressure + regional stress
+
+**Calibration:** `scripts/calibrate_engine.py --engine physics` sweeps `d_swd_override` (constant D for testing; set to None in production to use formation lookup), `frac_lambda_km`, and `depth_sigma_km`.
+
+**Fallback:** `HeuristicAttributionService` (`app/services/attribution_service.py`, label `"heuristic_v4"`) is retained. To revert: change `get_attribution_service()` in `app/api/dependencies.py` to `return HeuristicAttributionService()`.
 
 ### `event_context_snapshot` table migration
 

@@ -1,0 +1,89 @@
+SEISMIC-BACK CODEBASE — SERVICES LAYER SYMBOL MAP
+Generated: 2026-05-08 | Path: app/services/
+
+CLASS: HeuristicAttributionService [attribution_service.py:29]
+  Engine: "heuristic_v0" (legacy, replaced by physics_v0)
+  METHOD: score(context: EventContextOut) -> AttributionResult
+  METHOD: _verdict(swd_score, frac_score) -> tuple[str, float]  — log-odds/softmax: (driver, confidence)
+  METHOD: _temporal_weight(context, w, time_lambda_days) -> tuple[float, int|None]  — exponential decay by days since last H-10
+  METHOD: _depth_weight(event_depth_km, zone_top_ft, zone_bot_ft, depth_sigma_km) -> tuple[float, float|None]  — Gaussian penalty
+  METHOD: _rate_boost(w, rate_boost_cap) -> float  — boost from injection rate acceleration
+  METHOD: _swd_score(context) -> float
+  METHOD: _frac_score(context) -> float
+  SWD formula: sum(cumulative_bbl x exp(-dist_km / swd_lambda_km)) x temporal_weight x depth_weight x rate_boost
+  Frac formula: sum(water_vol x exp(-dist_km / frac_lambda_km))
+
+CLASS: PhysicsAttributionService [physics_attribution_service.py:68]
+  Engine: "physics_v0" — CURRENT PRODUCTION ENGINE
+  Doc: SWD attribution via pore-pressure diffusion; frac attribution via spatial decay.
+  SWD formula: sum(cumulative_bbl[i] x erfc(r[i] / 2*sqrt(D * t_inject[i])))
+  METHOD: __init__(d_swd_m2_s, frac_lambda_km, depth_sigma_km, rate_boost_cap, mc_n_trials)
+  METHOD: score(context: EventContextOut) -> AttributionResult  — main entry point
+  METHOD: _inject_duration_s(context, w) -> float  — estimates injection duration using first_report_date vs event_date
+  METHOD: _diffusion_weight(distance_km, t_inject_s) -> float  — erfc(r/2*sqrt(D*t)); 1.0 at wellbore, 0.0 far field
+  METHOD: _pressure_front_km(t_inject_s) -> float  — Shapiro triggering front: r_front = sqrt(4*pi*D*t)
+  METHOD: _swd_score(context) -> float
+  METHOD: _frac_score(context) -> float
+  Registered via: get_attribution_service() factory in app/api/dependencies.py
+
+CLASS: EventContextService [event_context_service.py:51]
+  Doc: Central orchestrator for event-context assembly across all data buckets.
+  METHOD: __init__(seismic_repo, swd_repo, fracfocus_repo, iris_repo, settings)
+  METHOD: assemble(event_id, swd_radius_km, swd_window_days, frac_radius_km, frac_window_days, station_radius_km) -> Optional[EventContextOut]
+  METHOD: _nearby_swd(ev_lat, ev_lon, ev_date, radius_km, window_days) -> list[NearbySWDWell]
+  METHOD: _nearby_frac(ev_lat, ev_lon, ev_date, radius_km, window_days) -> list[NearbyFracJob]
+  METHOD: _build_frac_prior(ev_lat, ev_lon, ev_date, search_radius_km, window_days, inner_job_count) -> FracPriorParams
+    — Queries FracFocus at 5x radius; falls back to Delaware Basin literature defaults when sparse
+  METHOD: _nearby_stations(ev_lat, ev_lon, radius_km) -> list[NearbyStation]
+  FUNCTION: _rate_change_ratio(records) -> Optional[float]  — mean of last 3 vs prior 9 monthly records
+  FUNCTION: _bbox(lat, lon, radius_km) -> tuple[float, float, float, float]
+
+CLASS: MonteCarloFracSampler [mc_frac_prior.py:158]
+  Doc: 2000 Monte Carlo trials to quantify frac uncertainty when observed data is absent.
+  Each trial: draw n_jobs ~ Poisson(n_jobs_mean), draw distance/volume/depth per job, compute frac score.
+  METHOD: sample(params, event_depth_km, frac_radius_km, frac_lambda_km, depth_sigma_km, n_trials, seed) -> tuple[mean, p5, p95]
+  FUNCTION: build_prior_from_jobs(rows, search_radius_km, broader_radius_km, inner_job_count) -> FracPriorParams
+    — Scales observed job count to search area using ratio of areas
+  FUNCTION: _poisson_sample(rng, lam) -> int  — Knuth algorithm; suitable for lambda < 30
+
+CLASS: SyncService [fracfocus_sync_service.py:21]
+  Note: _sync_lock and _is_running are MODULE-SCOPE, not instance — shared across all DI-created instances.
+  METHOD: run_sync(history_id) -> SyncResult
+  METHOD: _do_sync(history_id) -> SyncResult  — three-layer skip: ETag -> ZIP metadata -> atomic per-CSV replace
+  METHOD: get_status() -> SyncStatusResponse
+
+CLASS: DownloadService [fracfocus_download_service.py:11]
+  METHOD: check_remote_changed(url, known_etag, known_last_modified) -> tuple[bool, etag, last_modified]
+    — Conservatively returns changed=True when headers are absent
+  METHOD: stream_download_to_disk(url, dest_path) -> Path  — streaming to avoid loading whole file
+  METHOD: read_zip_csv_infos(zip_path) -> list[ZipInfo]  — metadata only, no decompression
+  METHOD: extract_files(zip_path, filenames, dest_dir) -> list[Path]
+
+CLASS: CsvIngestionService [fracfocus_ingestion_service.py:10]
+  METHOD: infer_columns(csv_path) -> list[str]  — normalizes: "JobStartDate" -> "jobstartdate"
+  METHOD: process_csv(csv_path) -> int  — atomic DELETE + bulk INSERT per CSV; returns row count
+
+CLASS: TexNetService [texnet_service.py:20]
+  METHOD: fetch_delaware_events(min_magnitude, page_size) -> list[dict]  — ArcGIS REST pagination
+  METHOD: _query_page(min_magnitude, offset, page_size) -> tuple[list, bool]
+  METHOD: _normalize(attrs) -> Optional[dict]
+  Output tagged: source="texnet" in seismic_events table
+
+CLASS: USGSService [usgs_service.py:10]
+  METHOD: fetch_delaware_events(min_magnitude, page_size) -> tuple[list, int]  — FDSN pagination
+  METHOD: _normalize(feat) -> Optional[dict]
+  CRITICAL: USGS_START_TIME must be set — without it USGS returns only last 30 days (not historical)
+  Output tagged: source="usgs" in seismic_events table
+
+CLASS: IRISService [iris_service.py:12]
+  METHOD: fetch_delaware_stations() -> tuple[list, int]  — EarthScope FDSN Station API, pipe-delimited text
+  METHOD: _normalize(line) -> Optional[dict]
+
+CLASS: UICService [uic_service.py:30]
+  METHOD: fetch_delaware_wells(start_offset, on_page_done) -> list[dict]  — checkpoint-resumable Socrata pagination
+  METHOD: _normalize(rec) -> Optional[dict]
+
+CLASS: H10Service [h10_service.py:32]
+  METHOD: fetch_for_wells(uic_numbers, start_from, resume_page_offset, on_page_done) -> None  — chunked + resumable
+  METHOD: _fetch_chunk(uic_numbers, chunk_start, start_page_offset, on_page_done) -> int
+  METHOD: _normalize(rec) -> Optional[dict]

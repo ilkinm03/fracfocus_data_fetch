@@ -26,6 +26,10 @@ class NearbySWDWell(BaseModel):
     # ratio of mean monthly injection in last 3 months vs prior 9 months
     # >1.0 = ramp-up, <1.0 = ramp-down, None = insufficient data
     rate_change_ratio: Optional[float] = None
+    # formation-specific fields populated by PhysicsAttributionService
+    formation_name: Optional[str] = None
+    d_m2_s_used: Optional[float] = None   # hydraulic diffusivity used in Theis calculation
+    cff_weight: Optional[float] = None    # Coulomb failure weight from avg_pressure_psi
 
 
 class NearbyFracJob(BaseModel):
@@ -39,6 +43,7 @@ class NearbyFracJob(BaseModel):
     well_name: Optional[str] = None
     total_water_volume: Optional[float] = None
     formation_depth: Optional[float] = None
+    depth_source: Optional[str] = None   # "tvd" | "falldepth" | "basin_default"
 
 
 class NearbyStation(BaseModel):
@@ -86,6 +91,23 @@ class AttributionResult(BaseModel):
     # adjusted_* uses mc_frac_score_mean in the verdict instead of the observed zero
     adjusted_likely_driver: Optional[str]   = None
     adjusted_confidence:    Optional[float] = None
+    # Physics enhancement flags
+    cff_applied: bool = False    # True when Coulomb boost was applied to any SWD well
+
+
+class SequenceStatsOut(BaseModel):
+    """Seismic sequence statistics for events near the analysed event."""
+    n_events: int
+    b_value: Optional[float] = None
+    omori_p: Optional[float] = None
+    interevent_cv: Optional[float] = None
+    cusum_peak: Optional[float] = None
+    n_background: Optional[int] = None    # ETAS-classified background events
+    n_triggered: Optional[int] = None     # ETAS-classified triggered (aftershock) events
+    background_fraction: Optional[float] = None
+    mc_used: float = 2.0
+    radius_km: float = 20.0
+    window_days: int = 365
 
 
 class EventContextOut(BaseModel):
@@ -113,3 +135,4 @@ class EventAnalysisOut(BaseModel):
     snapshot_id: int
     context: EventContextOut
     attribution: AttributionResult
+    sequence_stats: Optional[SequenceStatsOut] = None

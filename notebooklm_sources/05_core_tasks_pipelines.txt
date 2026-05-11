@@ -1,0 +1,146 @@
+SEISMIC-BACK CODEBASE — CORE, TASKS, UTILS AND FULL PIPELINE MAP
+Generated: 2026-05-08 | Paths: app/core/, app/tasks/, app/utils/, main.py
+
+=== app/core/config.py ===
+
+CLASS: Settings(BaseSettings)
+  Loaded from .env / environment. Cached via @lru_cache — constructed once per process.
+
+Key settings:
+  DATABASE_URL              = "sqlite:///./fracfocus_data/fracfocus.db"
+  SYNC_ENABLED              = true  (disables APScheduler cron when false)
+  TEXNET_BBOX               = 28.5/32.5 lat, -105.5/-102.5 lon  (Delaware Basin, shared by all pipelines)
+  USGS_START_TIME           = "2000-01-01"  CRITICAL: without this, USGS returns only last 30 days
+  USGS_MIN_MAGNITUDE        = 1.5
+  SOCRATA_APP_TOKEN         = ""  (optional; removes rate limiting on data.texas.gov)
+  ANALYSIS_SWD_RADIUS_KM    = 20.0
+  ANALYSIS_SWD_WINDOW_DAYS  = 3650  (10 years; pressure fronts migrate slowly)
+  ANALYSIS_FRAC_RADIUS_KM   = 10.0
+  ANALYSIS_FRAC_WINDOW_DAYS = 730   (2 years)
+  ANALYSIS_STATION_RADIUS_KM= 50.0
+
+FUNCTION: get_settings() -> Settings  — @lru_cache; used as FastAPI Depends()
+
+=== app/core/database.py ===
+
+FUNCTION: _set_wal_mode(dbapi_connection, _record)  — SQLite WAL mode for concurrent reads
+FUNCTION: get_db() -> Generator[Session, None, None]
+FUNCTION: init_db() -> None
+  — Called on startup. Imports all ORM models (noqa: F401), runs create_all + all _ensure_*_columns().
+  — All new ORM model modules must be imported here before create_all is called.
+
+FUNCTION: _ensure_seismic_columns() -> None  — patches seismic_events table
+FUNCTION: _ensure_iris_station_columns() -> None  — patches iris_stations table
+FUNCTION: _ensure_swd_columns() -> None  — patches swd_wells + swd_monthly_monitor
+FUNCTION: _ensure_event_context_columns() -> None  — patches event_context_snapshot
+FUNCTION: _ensure_sync_history_columns() -> None  — patches sync_history
+
+ORM Migration Pattern (apply to every new column):
+  1. Add field to SQLAlchemy model class
+  2. Add column to relevant _ensure_*_columns() using PRAGMA table_info + ALTER TABLE ADD COLUMN
+  Never use Alembic — always this pattern.
+
+=== app/core/logging.py ===
+FUNCTION: setup_logging(level: str) -> None
+
+=== app/tasks/fracfocus_scheduler.py ===
+
+CRITICAL: APScheduler runs in its own thread where FastAPI Depends() is unavailable.
+This file manually reconstructs the same service graph as dependencies.py.
+When adding a dependency to SyncService, update BOTH files.
+
+FUNCTION: _run_scheduled_sync() -> None
+  — Runs inside APScheduler thread; builds its own session + service graph.
+  — Cron schedule: day=1, hour=2 UTC (monthly FracFocus sync)
+
+FUNCTION: _reset_stale_running_jobs() -> None
+  — On server shutdown, marks 'running' jobs as 'interrupted'.
+  — Checkpoints are NOT deleted; next manual fetch resumes from checkpoint.
+
+FUNCTION: async lifespan(app: FastAPI) -> AsyncGenerator[None, None]
+  — FastAPI lifespan context manager. Starts APScheduler on startup, shuts down gracefully.
+
+=== app/utils/geo.py ===
+
+FUNCTION: haversine_km(lat1, lon1, lat2, lon2) -> float
+  Doc: Great-circle distance in kilometres between two WGS-84 points.
+  Used by EventContextService to filter wells/jobs/stations within true radius after bbox query.
+
+=== FULL END-TO-END PIPELINE MAP ===
+
+FRACFOCUS PIPELINE (monthly cron + manual trigger):
+  POST /api/v1/sync/trigger
+    -> SyncService.run_sync()
+      -> _do_sync()
+        -> DownloadService.check_remote_changed()      [HEAD request, ETag/Last-Modified]
+        -> DownloadService.read_zip_csv_infos()         [ZIP metadata only]
+        -> CsvFileStateRepository.get_changed_files()
+        -> DownloadService.extract_files()
+        -> CsvIngestionService.process_csv() x N CSVs
+          -> infer_columns()                            [header normalization]
+          -> FracFocusRepository.create_table_if_not_exists()
+          -> FracFocusRepository.ensure_columns()
+          -> FracFocusRepository.replace_csv_data()     [atomic DELETE+INSERT]
+        -> SyncStateRepository.upsert()                 [etag written last]
+        -> SyncHistoryRepository.finish()
+
+TEXNET PIPELINE:
+  POST /api/v1/seismic/texnet/fetch
+    -> TexNetService.fetch_delaware_events()
+      -> _query_page() x N (paginated ArcGIS REST)
+      -> _normalize()
+    -> SeismicEventRepository.upsert_many()  [source="texnet"]
+    -> SyncHistoryRepository.finish()
+
+USGS PIPELINE:
+  POST /api/v1/seismic/usgs/fetch
+    -> USGSService.fetch_delaware_events()
+      -> _query_page() x N (paginated FDSN)
+      -> _normalize()
+    -> SeismicEventRepository.upsert_many()  [source="usgs"]
+    -> SyncHistoryRepository.finish()
+
+IRIS PIPELINE:
+  POST /api/v1/seismic/iris/stations/fetch
+    -> IRISService.fetch_delaware_stations()  [pipe-delimited text]
+      -> _normalize()
+    -> IRISStationRepository.upsert_many()
+
+SWD UIC PIPELINE (checkpoint-resumable):
+  POST /api/v1/swd/uic/fetch
+    -> UICService.fetch_delaware_wells()
+      -> Socrata paginated API x N pages
+      -> _normalize()
+    -> SWDRepository.upsert_wells()
+    -> SWDRepository.save_checkpoint()
+
+SWD H-10 PIPELINE (run after uic/fetch; checkpoint-resumable):
+  POST /api/v1/swd/h10/fetch
+    -> SWDRepository.get_all_uic_numbers()
+    -> H10Service.fetch_for_wells()
+      -> _fetch_chunk() x N chunks
+      -> _normalize()
+    -> SWDRepository.upsert_monitoring()
+    -> SWDRepository.save_checkpoint()
+
+ANALYSIS PIPELINE:
+  GET /api/v1/analysis/events/{event_id}/context  [read-only, no snapshot]
+    -> EventContextService.assemble()
+      -> SeismicEventRepository.get_by_event_id()
+      -> SWDRepository.find_wells_in_bbox() -> haversine_km filter
+        -> SWDRepository.get_monitoring_window() per well
+      -> FracFocusRepository.find_nearby()
+      -> IRISStationRepository.find_stations_in_bbox() -> haversine_km filter
+
+  POST /api/v1/analysis/events/{event_id}/analyze  [runs attribution + persists snapshot]
+    -> EventContextService.assemble()               [same as above]
+    -> PhysicsAttributionService.score()
+      -> _swd_score()    [erfc pore-pressure diffusion]
+      -> _frac_score()   [spatial decay]
+      -> MonteCarloFracSampler.sample()  [2000 trials -> (mean, p5, p95)]
+      -> _verdict()      [log-odds/softmax -> (driver, confidence)]
+    -> EventContextRepository.save_snapshot()
+
+TWO SQLALCHEMY PARADIGMS:
+  fracfocus table    -> SQLAlchemy Core  (dynamic schema from CSV header)
+  all other tables   -> SQLAlchemy ORM   (fixed schemas with _ensure_*_columns migration)

@@ -14,9 +14,19 @@ from app.schemas.analysis import (
     NearbySWDWell,
     NearbyFracJob,
     NearbyStation,
+    SequenceStatsOut,
 )
 from app.services.mc_frac_prior import build_prior_from_jobs
 from app.utils.geo import haversine_km
+from app.utils.formation_lookup import _DELAWARE_DEFAULT_DEPTH_FT
+from app.services.sequence_stats import (
+    b_value_mle,
+    omori_p_value,
+    interevent_cv,
+    cusum_rate_shift,
+    etas_decluster,
+    ETASEvent,
+)
 
 log = logging.getLogger(__name__)
 
@@ -229,12 +239,31 @@ class EventContextService:
                     pass
 
             form_depth: Optional[float] = None
+            depth_source: Optional[str] = None
             raw_fd = row.get("tvd")
             if raw_fd not in (None, "", "None"):
                 try:
                     form_depth = float(raw_fd)
+                    depth_source = "tvd"
                 except (TypeError, ValueError):
                     pass
+
+            # Fallback 1: alternate FracFocus depth columns
+            if form_depth is None:
+                for alt_col in ("falldepth", "truedepthtop", "tvdss"):
+                    raw_alt = row.get(alt_col)
+                    if raw_alt not in (None, "", "None"):
+                        try:
+                            form_depth = float(raw_alt)
+                            depth_source = alt_col
+                            break
+                        except (TypeError, ValueError):
+                            pass
+
+            # Fallback 2: Delaware Basin default (Wolfcamp A / Bone Spring midpoint)
+            if form_depth is None:
+                form_depth = _DELAWARE_DEFAULT_DEPTH_FT
+                depth_source = "basin_default"
 
             result.append(
                 NearbyFracJob(
@@ -248,6 +277,7 @@ class EventContextService:
                     well_name=row.get("wellname"),
                     total_water_volume=water_vol,
                     formation_depth=form_depth,
+                    depth_source=depth_source,
                 )
             )
 
@@ -324,3 +354,70 @@ class EventContextService:
 
         result.sort(key=lambda s: s.distance_km)
         return result
+
+    # --------------------------------------------------------------- Sequence stats
+
+    def compute_sequence_stats(
+        self,
+        ev_lat: float,
+        ev_lon: float,
+        ev_date: Optional[datetime],
+        radius_km: float = 20.0,
+        window_days: int = 365,
+        mc_used: float = 2.0,
+    ) -> Optional[SequenceStatsOut]:
+        """Compute seismic sequence statistics for events near (ev_lat, ev_lon).
+
+        Fetches nearby events from the catalog, runs ETAS declustering, and
+        computes b-value, Omori p, interevent CV, and CUSUM statistics.
+        Returns None when fewer than 5 events are available.
+        """
+        nearby = self.seismic_repo.find_nearby_events(
+            lat=ev_lat,
+            lon=ev_lon,
+            radius_km=radius_km,
+            event_date=ev_date,
+            window_days=window_days,
+            min_magnitude=mc_used,
+        )
+        if len(nearby) < 5:
+            log.debug(f"Sequence stats: only {len(nearby)} events found near ({ev_lat},{ev_lon}); skipping")
+            return None
+
+        magnitudes = [e.magnitude for e in nearby if e.magnitude is not None]
+        dated = [(e.event_id, e.event_date, e.magnitude or 0.0)
+                 for e in nearby if e.event_date is not None]
+
+        if dated:
+            t0 = dated[0][1]
+            times_days = [(d - t0).total_seconds() / 86400.0 for _, d, _ in dated]
+        else:
+            times_days = list(range(len(nearby)))
+
+        b_val = b_value_mle(magnitudes, mc=mc_used)
+        omori_p = omori_p_value(times_days)
+        cv = interevent_cv(times_days)
+        cusum = cusum_rate_shift(times_days)
+
+        etas_events = [
+            ETASEvent(event_id=eid, time_days=t, magnitude=m)
+            for (eid, _, m), t in zip(dated, times_days)
+        ]
+        etas_result = etas_decluster(etas_events, mc=mc_used)
+        n_bg = sum(1 for e in etas_result if e.is_background)
+        n_trig = len(etas_result) - n_bg
+        bg_frac = round(n_bg / len(etas_result), 4) if etas_result else None
+
+        return SequenceStatsOut(
+            n_events=len(nearby),
+            b_value=b_val,
+            omori_p=omori_p,
+            interevent_cv=cv,
+            cusum_peak=cusum,
+            n_background=n_bg,
+            n_triggered=n_trig,
+            background_fraction=bg_frac,
+            mc_used=mc_used,
+            radius_km=radius_km,
+            window_days=window_days,
+        )

@@ -1,34 +1,39 @@
-"""Pore-pressure diffusion attribution engine (Shapiro et al. 1997).
+"""Pore-pressure diffusion attribution engine — physics_v2.
 
-Replaces the static exponential spatial decay used by the heuristic engine with a
-physically derived pressure-influence function based on the complementary error
-function (erfc). The key difference:
+Improvements over physics_v1
+-----------------------------
+1. Per-well hydraulic diffusivity D from Delaware Basin formation lookup
+   (replaces single 0.5 m²/s constant; see app/utils/formation_lookup.py).
+   D now varies from 0.001 m²/s (evaporites) to 0.6 m²/s (Bone Spring).
+2. Coulomb Failure Function (CFF) boost: H-10 average injection pressure
+   is converted to ΔP (MPa) and used to compute a CFF weight that multiplies
+   each well's score when the fault is in a favourable orientation relative
+   to the Delaware Basin regional stress (σ_Hmax N45°E).
+3. Injection duration: record-count fallback (monthly_record_count × 30.44 d)
+   is used when first_report_date is unavailable, giving a better estimate
+   for established wells whose earliest record pre-dates the search window.
+4. Formation name and D value are surfaced in signal descriptions for
+   transparency and auditability.
 
-  Heuristic:  weight = exp(−r / λ)                      [static; λ is a tuned constant]
-  Physics:    weight = erfc(r / 2√(D·t))                [time-dependent; D is diffusivity]
+Physics basis (unchanged from v1)
+----------------------------------
+SWD:  Σ_i  cumulative_bbl[i]
+            × erfc(r[i] / 2√(D_i · t_i))   Shapiro / Theis diffusion
+            × exp(−Δdepth² / 2σ²)           depth mismatch penalty
+            × min(rate_ratio[i], cap)        injection rate boost
+            × (1 + cff_weight[i])           Coulomb failure boost  ← new
 
-where:
-  r  = distance from well to earthquake (metres)
-  D  = hydraulic diffusivity of the host formation (m²/s)
-  t  = estimated injection duration (seconds)
+Frac: Σ_j  (water_vol_gal[j] / 42)
+            × exp(−r[j] / λ_frac)           spatial decay
+            × exp(−Δdepth² / 2σ²)           depth mismatch penalty
 
-The erfc formulation naturally captures that a well 15 km away which has been
-injecting for 1 year should have negligible influence (pressure front hasn't
-arrived), while the same well after 5 years of injection has meaningful influence.
-The heuristic model cannot distinguish these two cases.
-
-Frac scoring is inherited unchanged from the heuristic engine (spatial + depth
-decay), since poroelastic stress from fracking is nearly instantaneous and does
-not require a diffusion model.
+MC:   when frac data absent → MonteCarloFracSampler (numpy, 2 000 trials)
 
 References
 ----------
-Shapiro S.A., Huenges E., Borm G. (1997). Estimating the crust permeability from
-fluid-injection-induced seismic emission at the KTB site. Geophysical Journal
-International, 131(2), F15–F18.
-
-Smye K. et al. (2024). Hydraulic diffusivity in the Delaware Basin from SWD-induced
-seismicity migration rates. [Internal BEG report — replace with published citation.]
+Shapiro S.A., Huenges E., Borm G. (1997). GJI 131(2), F15–F18.
+Smye K. et al. (2024). Hydraulic diffusivity in the Delaware Basin.
+King G. et al. (1994). Static stress changes and the triggering of earthquakes.
 """
 
 import math
@@ -40,69 +45,57 @@ from app.services.attribution_service import (
     _DEPTH_SIGMA_KM,
     _RATE_BOOST_CAP,
     _GAL_PER_BBL,
-    _FT_TO_KM,
 )
 from app.services.mc_frac_prior import MonteCarloFracSampler
+from app.utils.formation_lookup import get_diffusivity, get_formation_name
+from app.services.coulomb_service import cff_weight_from_psi
 
 log = logging.getLogger(__name__)
 
-_ENGINE = "physics_v1"
-
-# ---------------------------------------------------------------------------
-# Physical constants
-# ---------------------------------------------------------------------------
-
-# Hydraulic diffusivity for Delaware Basin Wolfcamp / Bone Spring formations.
-# Published range: 0.01–5 m²/s.  Smye et al. (2024) estimate 0.1–1.0 m²/s.
-# Default: 0.5 m²/s (geometric mean of reported range).  Injectable for calibration.
-_D_SWD_M2_S: float = 0.5
+_ENGINE = "physics_v2"
 
 _SECONDS_PER_DAY: float = 86_400.0
 _METERS_PER_KM: float = 1_000.0
-
-# Minimum injection duration fed into the diffusion formula.
-# Prevents singularity at t = 0 and handles wells with a single H-10 record.
 _MIN_INJECT_DAYS: float = 30.0
 
 
 class PhysicsAttributionService:
-    """SWD attribution via pore-pressure diffusion; frac attribution via spatial decay.
-
-    SWD score = Σ  cumulative_bbl[i]
-                    × erfc( r[i] / 2√(D · t_inject[i]) )   # diffusion influence
-                    × exp( −Δdepth[i]² / 2σ² )             # depth mismatch penalty
-                    × min( rate_change_ratio[i], cap )      # injection rate boost
-
-    Frac score = Σ  (water_vol_gal[i] / 42)
-                     × exp( −r[i] / λ_frac )               # spatial decay
-                     × exp( −Δdepth[i]² / 2σ² )            # depth mismatch penalty
+    """SWD attribution via pore-pressure diffusion with formation-specific D and CFF.
 
     Parameters
     ----------
-    d_swd_m2_s : float
-        Hydraulic diffusivity D (m²/s). Higher values → faster pressure propagation
-        → distant wells score higher. Calibrate against ground-truth labels using
-        scripts/calibrate_engine.py --engine physics.
+    d_swd_override : float or None
+        When set, overrides the per-well formation D with a single constant.
+        Intended for calibration grid search (calibrate_engine.py --engine physics).
+        When None (default), D is taken from the Delaware Basin formation table.
     frac_lambda_km : float
-        Spatial decay length-scale for frac (km). Inherited from heuristic engine.
+        Spatial decay length-scale for frac (km).
     depth_sigma_km : float
-        Gaussian σ for depth-mismatch penalty (km). Inherited from heuristic engine.
+        Gaussian σ for depth-mismatch penalty (km).
     rate_boost_cap : float
-        Maximum rate-change multiplier for SWD. Inherited from heuristic engine.
+        Maximum rate-change multiplier for SWD.
+    apply_cff : bool
+        When True, applies Coulomb Failure Function boost to SWD scores using
+        H-10 average injection pressure. Set False in calibration mode to
+        isolate diffusion parameters.
+    mc_n_trials : int
+        Monte Carlo trials for frac uncertainty quantification.
     """
 
     def __init__(
         self,
-        d_swd_m2_s: float = _D_SWD_M2_S,
+        d_swd_override: float | None = None,
         frac_lambda_km: float = _FRAC_LAMBDA_KM,
         depth_sigma_km: float = _DEPTH_SIGMA_KM,
         rate_boost_cap: float = _RATE_BOOST_CAP,
-        mc_n_trials: int = 1000,
+        apply_cff: bool = True,
+        mc_n_trials: int = 2000,
     ) -> None:
-        self.d_swd_m2_s = d_swd_m2_s
+        self.d_swd_override = d_swd_override
         self.frac_lambda_km = frac_lambda_km
         self.depth_sigma_km = depth_sigma_km
         self.rate_boost_cap = rate_boost_cap
+        self.apply_cff = apply_cff
         self._mc_sampler = MonteCarloFracSampler()
         self._mc_n_trials = mc_n_trials
 
@@ -117,7 +110,6 @@ class PhysicsAttributionService:
         frac_data_quality = "observed" if context.nearby_frac_jobs else "absent"
         driver, confidence = HeuristicAttributionService._verdict(swd_score, frac_score)
 
-        # Monte Carlo uncertainty layer — runs only when frac data is absent
         mc_mean = mc_p5 = mc_p95 = None
         adj_driver = adj_conf = None
         if context.frac_prior_params is not None:
@@ -132,61 +124,74 @@ class PhysicsAttributionService:
             adj_driver, adj_conf = HeuristicAttributionService._verdict(swd_score, mc_mean)
 
         signals: list[AttributionSignal] = []
+        cff_was_applied = False
 
         for w in context.nearby_swd_wells:
-            if w.cumulative_bbl > 0:
-                t_s = self._inject_duration_s(context, w)
-                diff_w = self._diffusion_weight(w.distance_km, t_s)
-                depth_w, delta_km = HeuristicAttributionService._depth_weight(
-                    context.event_depth_km, w.top_inj_zone, w.bot_inj_zone, self.depth_sigma_km
-                )
-                rate_w = HeuristicAttributionService._rate_boost(w, self.rate_boost_cap)
-                weighted_val = w.cumulative_bbl * diff_w * depth_w * rate_w
+            if w.cumulative_bbl <= 0:
+                continue
+            t_s = self._inject_duration_s(context, w)
+            d_val = self._well_diffusivity(w)
+            diff_w = self._diffusion_weight(w.distance_km, t_s, d_val)
+            depth_w, delta_km = HeuristicAttributionService._depth_weight(
+                context.event_depth_km, w.top_inj_zone, w.bot_inj_zone, self.depth_sigma_km
+            )
+            rate_w = HeuristicAttributionService._rate_boost(w, self.rate_boost_cap)
 
-                front_km = self._pressure_front_km(t_s)
-                depth_note = f", depth Δ{delta_km} km" if delta_km is not None else ""
-                rate_note = (
-                    f", rate ×{w.rate_change_ratio:.2f} (capped ×{rate_w:.2f})"
-                    if w.rate_change_ratio is not None else ""
+            cff_w = 0.0
+            if self.apply_cff:
+                cff_w = cff_weight_from_psi(w.avg_pressure_psi)
+                if cff_w > 0:
+                    cff_was_applied = True
+
+            weighted_val = w.cumulative_bbl * diff_w * depth_w * rate_w * (1.0 + cff_w)
+
+            front_km = self._pressure_front_km(t_s, d_val)
+            form_name = get_formation_name(w.top_inj_zone, w.bot_inj_zone)
+            depth_note = f", depth Δ{delta_km} km" if delta_km is not None else ""
+            rate_note = (
+                f", rate ×{w.rate_change_ratio:.2f} (capped ×{rate_w:.2f})"
+                if w.rate_change_ratio is not None else ""
+            )
+            cff_note = f", CFF ×{1.0 + cff_w:.3f}" if cff_w > 0 else ""
+            signals.append(
+                AttributionSignal(
+                    name=f"SWD {w.uic_number}",
+                    value=round(weighted_val, 2),
+                    unit="weighted_bbl",
+                    description=(
+                        f"{w.uic_number} — {w.distance_km} km, "
+                        f"{w.cumulative_bbl:,.0f} bbl, "
+                        f"front≈{front_km:.1f} km, erfc={diff_w:.4f}, "
+                        f"D={d_val:.3f} m²/s [{form_name}]"
+                        f"{depth_note}{rate_note}{cff_note}"
+                    ),
                 )
-                signals.append(
-                    AttributionSignal(
-                        name=f"SWD {w.uic_number}",
-                        value=round(weighted_val, 2),
-                        unit="weighted_bbl",
-                        description=(
-                            f"{w.uic_number} — {w.distance_km} km away, "
-                            f"{w.cumulative_bbl:,.0f} bbl cumul., "
-                            f"pressure front ≈{front_km:.1f} km, "
-                            f"erfc={diff_w:.4f}"
-                            f"{depth_note}{rate_note}"
-                        ),
-                    )
-                )
+            )
 
         for j in context.nearby_frac_jobs:
             wv_bbl = (j.total_water_volume or 0.0) / _GAL_PER_BBL
-            if wv_bbl > 0:
-                spatial_w = math.exp(-j.distance_km / self.frac_lambda_km)
-                depth_w, delta_km = HeuristicAttributionService._depth_weight(
-                    context.event_depth_km, j.formation_depth, j.formation_depth, self.depth_sigma_km
+            if wv_bbl <= 0:
+                continue
+            spatial_w = math.exp(-j.distance_km / self.frac_lambda_km)
+            depth_w, delta_km = HeuristicAttributionService._depth_weight(
+                context.event_depth_km, j.formation_depth, j.formation_depth, self.depth_sigma_km
+            )
+            weighted_val = wv_bbl * spatial_w * depth_w
+            depth_note = f", depth Δ{delta_km} km" if delta_km is not None else ""
+            depth_src = f" [{j.depth_source}]" if j.depth_source else ""
+            signals.append(
+                AttributionSignal(
+                    name=f"FRAC {j.api_number or j.well_name or 'unknown'}",
+                    value=round(weighted_val, 2),
+                    unit="weighted_bbl",
+                    description=(
+                        f"Frac job at {j.distance_km} km, started {j.job_start_date}, "
+                        f"{j.total_water_volume:,.0f} gal ({wv_bbl:,.0f} bbl)"
+                        f"{depth_note}{depth_src}"
+                    ),
                 )
-                weighted_val = wv_bbl * spatial_w * depth_w
-                depth_note = f", depth Δ{delta_km} km" if delta_km is not None else ""
-                signals.append(
-                    AttributionSignal(
-                        name=f"FRAC {j.api_number or j.well_name or 'unknown'}",
-                        value=round(weighted_val, 2),
-                        unit="weighted_bbl",
-                        description=(
-                            f"Frac job at {j.distance_km} km, started {j.job_start_date}, "
-                            f"{j.total_water_volume:,.0f} gal ({wv_bbl:,.0f} bbl) water volume"
-                            f"{depth_note}"
-                        ),
-                    )
-                )
+            )
 
-        # Add a synthetic MC signal when frac data is absent so it appears in the signal list
         if mc_mean is not None and mc_mean > 0:
             prior = context.frac_prior_params
             signals.append(
@@ -197,8 +202,7 @@ class PhysicsAttributionService:
                     description=(
                         f"Monte Carlo frac estimate (N={self._mc_n_trials}): "
                         f"mean={mc_mean:,.0f}, p5={mc_p5:,.0f}, p95={mc_p95:,.0f} — "
-                        f"prior source={prior.source}, "
-                        f"sample_size={prior.sample_size}, "
+                        f"prior source={prior.source}, sample_size={prior.sample_size}, "
                         f"n_jobs_mean={prior.n_jobs_mean:.2f}"
                     ),
                 )
@@ -206,22 +210,18 @@ class PhysicsAttributionService:
 
         signals.sort(key=lambda s: s.value, reverse=True)
 
-        if mc_mean is not None:
-            log.info(
-                f"Attribution [{_ENGINE}] event={context.event_id}: "
-                f"driver={driver} conf={confidence} | "
-                f"swd={swd_score:.2f} frac_obs={frac_score:.2f} mc_frac_mean={mc_mean:.2f} "
-                f"(p5={mc_p5:.2f} p95={mc_p95:.2f}) | "
-                f"adj_driver={adj_driver} adj_conf={adj_conf:.4f} | "
-                f"D={self.d_swd_m2_s} m²/s"
-            )
-        else:
-            log.info(
-                f"Attribution [{_ENGINE}] event={context.event_id}: "
-                f"driver={driver} conf={confidence} "
-                f"swd={swd_score:.2f} frac={frac_score:.2f} "
-                f"D={self.d_swd_m2_s} m²/s"
-            )
+        mc_part = (
+            f"mc_frac_mean={mc_mean:.2f} (p5={mc_p5:.2f} p95={mc_p95:.2f}) | "
+            f"adj={adj_driver}/{adj_conf:.4f} | "
+            if mc_mean is not None else ""
+        )
+        log.info(
+            f"Attribution [{_ENGINE}] event={context.event_id}: "
+            f"driver={driver} conf={confidence} | "
+            f"swd={swd_score:.2f} frac={frac_score:.2f} | "
+            f"{mc_part}cff={cff_was_applied}"
+        )
+
         return AttributionResult(
             engine=_ENGINE,
             likely_driver=driver,
@@ -235,23 +235,27 @@ class PhysicsAttributionService:
             mc_frac_score_p95=mc_p95,
             adjusted_likely_driver=adj_driver,
             adjusted_confidence=adj_conf,
+            cff_applied=cff_was_applied,
         )
 
     # ------------------------------------------------------------------
     # Physics helpers
     # ------------------------------------------------------------------
 
+    def _well_diffusivity(self, w) -> float:
+        """Return D (m²/s): calibration override takes precedence over formation lookup."""
+        if self.d_swd_override is not None:
+            return self.d_swd_override
+        return get_diffusivity(w.top_inj_zone, w.bot_inj_zone)
+
     def _inject_duration_s(self, context: EventContextOut, w) -> float:
-        """Estimate how long the well has been injecting before the event, in seconds.
+        """Estimate injection duration before the event (seconds).
 
-        Uses first_report_date (earliest H-10 record in the search window) relative
-        to the event date. Falls back to monthly_record_count × 30.44 days when the
-        first record date is unavailable. A floor of _MIN_INJECT_DAYS prevents
-        singularity at t = 0 and treats wells with a single record conservatively.
-
-        Note: first_report_date is bounded by the search window start (default 10
-        years). Wells older than the window will have their duration capped at the
-        window length — a conservative underestimate.
+        Priority:
+        1. first_report_date in the search window  → exact date difference
+        2. monthly_record_count × 30.44 days       → record-count fallback
+           (not bounded by the search window, so old wells aren't underestimated)
+        3. Floor: _MIN_INJECT_DAYS (30 d)          → prevents t = 0 singularity
         """
         if context.event_date is not None and w.first_report_date is not None:
             days = (context.event_date - w.first_report_date).days
@@ -261,29 +265,17 @@ class PhysicsAttributionService:
             days = _MIN_INJECT_DAYS
         return max(days, _MIN_INJECT_DAYS) * _SECONDS_PER_DAY
 
-    def _diffusion_weight(self, distance_km: float, t_inject_s: float) -> float:
-        """Complementary error function pressure influence.
-
-        erfc(r / 2√(D·t)) — ranges from 1.0 (at the wellbore) to 0.0 (far field).
-
-        Geophysical interpretation: erfc measures how much of the injected pressure
-        wave has reached distance r after injection for time t with diffusivity D.
-        A value of 0.0 means the pressure front has not yet arrived; 1.0 means full
-        pressure perturbation has been established.
-        """
+    def _diffusion_weight(self, distance_km: float, t_inject_s: float, d_m2_s: float) -> float:
+        """erfc(r / 2√(D·t)) — 1.0 at wellbore, 0.0 far field."""
         r_m = distance_km * _METERS_PER_KM
-        diffusion_length = 2.0 * math.sqrt(self.d_swd_m2_s * t_inject_s)
+        diffusion_length = 2.0 * math.sqrt(d_m2_s * t_inject_s)
         if diffusion_length == 0.0:
             return 0.0
         return math.erfc(r_m / diffusion_length)
 
-    def _pressure_front_km(self, t_inject_s: float) -> float:
-        """Shapiro triggering front radius (km): r_front = √(4π·D·t).
-
-        Returned purely for display in signal descriptions — the front radius tells
-        investigators how far pressure has theoretically propagated for this well.
-        """
-        return math.sqrt(4.0 * math.pi * self.d_swd_m2_s * t_inject_s) / _METERS_PER_KM
+    def _pressure_front_km(self, t_inject_s: float, d_m2_s: float) -> float:
+        """Shapiro triggering front radius (km): r_front = √(4π·D·t)."""
+        return math.sqrt(4.0 * math.pi * d_m2_s * t_inject_s) / _METERS_PER_KM
 
     # ------------------------------------------------------------------
     # Score accumulators
@@ -292,24 +284,28 @@ class PhysicsAttributionService:
     def _swd_score(self, context: EventContextOut) -> float:
         total = 0.0
         for w in context.nearby_swd_wells:
-            if w.cumulative_bbl > 0 and w.distance_km > 0:
-                t_s = self._inject_duration_s(context, w)
-                diff_w = self._diffusion_weight(w.distance_km, t_s)
-                depth_w, _ = HeuristicAttributionService._depth_weight(
-                    context.event_depth_km, w.top_inj_zone, w.bot_inj_zone, self.depth_sigma_km
-                )
-                rate_w = HeuristicAttributionService._rate_boost(w, self.rate_boost_cap)
-                total += w.cumulative_bbl * diff_w * depth_w * rate_w
+            if w.cumulative_bbl <= 0 or w.distance_km <= 0:
+                continue
+            t_s = self._inject_duration_s(context, w)
+            d_val = self._well_diffusivity(w)
+            diff_w = self._diffusion_weight(w.distance_km, t_s, d_val)
+            depth_w, _ = HeuristicAttributionService._depth_weight(
+                context.event_depth_km, w.top_inj_zone, w.bot_inj_zone, self.depth_sigma_km
+            )
+            rate_w = HeuristicAttributionService._rate_boost(w, self.rate_boost_cap)
+            cff_w = cff_weight_from_psi(w.avg_pressure_psi) if self.apply_cff else 0.0
+            total += w.cumulative_bbl * diff_w * depth_w * rate_w * (1.0 + cff_w)
         return total
 
     def _frac_score(self, context: EventContextOut) -> float:
         total = 0.0
         for j in context.nearby_frac_jobs:
             wv_bbl = (j.total_water_volume or 0.0) / _GAL_PER_BBL
-            if wv_bbl > 0 and j.distance_km > 0:
-                spatial_w = math.exp(-j.distance_km / self.frac_lambda_km)
-                depth_w, _ = HeuristicAttributionService._depth_weight(
-                    context.event_depth_km, j.formation_depth, j.formation_depth, self.depth_sigma_km
-                )
-                total += wv_bbl * spatial_w * depth_w
+            if wv_bbl <= 0 or j.distance_km <= 0:
+                continue
+            spatial_w = math.exp(-j.distance_km / self.frac_lambda_km)
+            depth_w, _ = HeuristicAttributionService._depth_weight(
+                context.event_depth_km, j.formation_depth, j.formation_depth, self.depth_sigma_km
+            )
+            total += wv_bbl * spatial_w * depth_w
         return total

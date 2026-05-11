@@ -1,0 +1,119 @@
+SEISMIC-BACK CODEBASE — MODELS AND SCHEMAS SYMBOL MAP
+Generated: 2026-05-08 | Paths: app/models/ (SQLAlchemy ORM), app/schemas/ (Pydantic)
+
+ORM MIGRATION PATTERN:
+  Base.metadata.create_all creates tables but never alters existing ones.
+  _ensure_*_columns() in app/core/database.py use PRAGMA table_info + ALTER TABLE ADD COLUMN
+  to patch existing tables without data loss. Apply this pattern for every new column added.
+
+=== ORM MODELS (app/models/) ===
+
+CLASS: SeismicEvent(Base) [seismic_event.py:5]
+  Table: seismic_events (shared by TexNet + USGS)
+  Common columns: source, event_id, magnitude, mag_type, latitude, longitude, depth,
+    event_type, event_date, evaluation_status, rms
+  TexNet-specific: phase_count, region_name, county_name, station_count
+  USGS-specific: place, title, alternate_ids, gap
+  evaluation_status: "final"/"preliminary" (TexNet) vs "reviewed"/"automatic" (USGS)
+  alternate_ids: comma-separated cross-catalog IDs populated by USGS for cross-catalog reconciliation
+
+CLASS: IRISStation(Base) [iris_station.py:5]
+  Table: iris_stations
+  Unique key: network_station
+  Columns: network, station, channel, location, latitude, longitude, elevation, depth,
+    azimuth, dip, instrument, scale, scale_freq, scale_units, sample_rate, start_time, end_time, active
+
+CLASS: SWDFetchCheckpoint(Base) [swd.py:6]
+  Table: swd_fetch_checkpoint
+  Doc: Generic per-source fetch checkpoint. One row per source.
+  Columns: source, progress_value, total_count, inserted_so_far, updated_so_far, secondary_value, updated_at
+
+CLASS: SWDWell(Base) [swd.py:20]
+  Table: swd_wells
+  Doc: UIC injection well inventory (RRC Texas). One row per well. Unique key: uic_number.
+  Stores static well metadata: location (lat/lon), well type, max injection pressure limits,
+    injection zone depths (zone_top_ft, zone_bot_ft), operator, county, field name.
+
+CLASS: SWDMonthlyMonitor(Base) [swd.py:53]
+  Table: swd_monthly_monitor
+  Doc: H-10 monthly injection monitoring (RRC Texas). One row per well per month.
+  Unique key: (uic_no, report_date). Joined to SWDWell via uic_no = SWDWell.uic_number.
+  Monthly columns: injected_bbls, avg_daily_pressure, max_daily_pressure, avg_daily_bbls,
+    well_status, report_date, last_report_date
+
+CLASS: EventContextSnapshot(Base) [event_context.py:6]
+  Table: event_context_snapshot
+  Doc: Persisted per-run analysis snapshot. One row per (event_id, run_timestamp). Append-only.
+  Columns: event_id, run_timestamp, engine, likely_driver, confidence, signals_json,
+    nearby_swd_count, nearby_frac_count, nearby_station_count, frac_data_quality,
+    mc_frac_score_mean, mc_frac_score_p5, mc_frac_score_p95,
+    adjusted_likely_driver, adjusted_confidence,
+    swd_radius_km, swd_window_days, frac_radius_km, frac_window_days, station_radius_km
+
+CLASS: SyncState(Base) [fracfocus_sync_state.py:6]
+  Table: sync_state | Columns: url, etag, last_modified, status, error, last_sync_time
+
+CLASS: CsvFileState(Base) [fracfocus_sync_state.py:18]
+  Table: csv_file_state | Columns: filename, file_size, file_date, row_count, processed_at
+
+CLASS: SyncHistory(Base) [sync_history.py:6]
+  Table: sync_history
+  Doc: One row per fetch/sync run across all pipelines. Tracks full lifecycle.
+  Columns: source, status, started_at, finished_at, rows_inserted, rows_updated, detail
+  Status values: pending -> running -> success / failed / skipped / interrupted
+
+=== PYDANTIC SCHEMAS (app/schemas/) ===
+
+FILE: app/schemas/analysis.py  — Attribution pipeline I/O
+
+CLASS: NearbySWDWell(BaseModel)
+  Fields: uic_number, operator, latitude, longitude, distance_km, depth_km,
+    zone_top_ft, zone_bot_ft, cumulative_bbl, last_report_date, first_report_date,
+    monthly_records (list), rate_change_ratio
+
+CLASS: NearbyFracJob(BaseModel)
+  Fields: api_number, operator, latitude, longitude, distance_km,
+    water_volume_gal, job_start_date, tvd_ft
+
+CLASS: NearbyStation(BaseModel)
+  Fields: network, station, latitude, longitude, distance_km, instrument, active
+
+CLASS: AttributionSignal(BaseModel)
+  Fields: source_id, signal_type, value, description
+
+CLASS: FracPriorParams(BaseModel)
+  Doc: MC frac prior parameters — fitted from FracFocus data or Delaware Basin literature defaults.
+  Fields: n_jobs_mean, water_vol_mean_gal, water_vol_std_gal, tvd_mean_ft, tvd_std_ft, data_quality
+
+CLASS: AttributionResult(BaseModel)
+  Fields: engine, likely_driver, confidence, swd_score, frac_score, signals,
+    mc_frac_score_mean, mc_frac_score_p5, mc_frac_score_p95,
+    adjusted_likely_driver, adjusted_confidence
+
+CLASS: EventContextOut(BaseModel)
+  Fields: event_id, event (SeismicEvent), nearby_swd (list[NearbySWDWell]),
+    nearby_frac (list[NearbyFracJob]), nearby_stations (list[NearbyStation]),
+    frac_prior (Optional[FracPriorParams])
+
+CLASS: EventAnalysisOut(BaseModel)
+  Fields: context (EventContextOut), attribution (AttributionResult), snapshot_id
+
+FILE: app/schemas/seismic.py
+  CLASS: SeismicEventOut(BaseModel)
+  CLASS: SeismicFetchResult(BaseModel)  — shared response for all seismic fetch endpoints
+  CLASS: SeismicEventListResponse(BaseModel)
+
+FILE: app/schemas/swd.py
+  CLASS: SWDFetchResult, SWDWellOut, SWDWellListResponse, SWDMonitorOut, SWDMonitorListResponse
+
+FILE: app/schemas/iris.py
+  CLASS: IRISStationOut, IRISFetchResult, IRISStationListResponse
+
+FILE: app/schemas/fracfocus.py
+  CLASS: FracFocusListResponse(BaseModel)
+
+FILE: app/schemas/fracfocus_sync.py
+  CLASS: CsvFileStatus, SyncStatusResponse, SyncTriggerResponse, SyncResult
+
+FILE: app/schemas/sync_history.py
+  CLASS: SyncHistoryOut, SyncHistoryListResponse
